@@ -1,0 +1,29 @@
+[package]
+name = "secret-sweep"
+version = "0.1.0"
+edition = "2021"
+description = "Backup local-only secrets and dotfiles across projects into an encrypted archive"
+
+[[bin]]
+name = "secret-sweep"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+argon2 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+colored = "2"
+dirs = "5"
+globset = "0.4"
+rayon = "1"
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rand = "0.8"
+tempfile = "3"
+toml = "0.8"
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

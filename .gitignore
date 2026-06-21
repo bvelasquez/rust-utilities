@@ -1,0 +1,27 @@
+# Rust / Cargo
+**/target/
+
+# Backup artifacts (secret-sweep)
+*.svault
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+*.swp
+*.swo
+*~
