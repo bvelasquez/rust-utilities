@@ -82,7 +82,8 @@ CRITICAL RULES:
 Composition:
 - Portrait canvas aspect ratio 9:16 ({w}x{h} target).
 - Keep the lower 55% relatively calm and uncluttered (space for a centered phone mockup).
-- Place visual interest in the upper area and soft edges — subtle gradients, light, texture, or organic shapes.
+- The entire top-left headline zone (top 38%, left 90% of width) must stay VERY DARK — no bright blooms, flares, clouds, or light streaks behind text. Use only deep shadows and subtle accent tones there.
+- Visual interest and brighter elements belong in the upper-right and mid-right edges only, away from the text column.
 - Theme preset: {theme}
 - Brand accent color: {accent}
 - Brand base color: {background}

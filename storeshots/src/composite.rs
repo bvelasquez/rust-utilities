@@ -36,7 +36,10 @@ pub async fn render_slide(ctx: RenderContext<'_>) -> Result<RgbaImage> {
     })
     .await?;
 
-    let caption_bottom = draw_caption(&ctx, &mut canvas)?;
+    let caption = measure_caption(&ctx);
+    let lum = caption_region_luminance(&canvas, &caption);
+    draw_caption_scrim(&mut canvas, &caption, lum, &ctx.cfg.brand.background);
+    let caption_bottom = draw_caption_text(&ctx, &mut canvas, &caption, lum)?;
 
     let placement = hero_phone_placement(ctx.canvas_w, ctx.canvas_h, caption_bottom);
     let raw_path = StoreshotsConfig::raw_path(ctx.app_root, &ctx.slide.raw);
@@ -76,9 +79,144 @@ pub async fn render_slide(ctx: RenderContext<'_>) -> Result<RgbaImage> {
     Ok(canvas)
 }
 
-/// Returns the Y coordinate (px) just below the caption block.
-fn draw_caption(ctx: &RenderContext<'_>, canvas: &mut RgbaImage) -> Result<f32> {
+/// Caption layout metrics (computed before drawing).
+struct CaptionLayout {
+    pad_x: f32,
+    top: f32,
+    bottom: f32,
+    width: f32,
+    label_size: f32,
+    title_size: f32,
+    subtitle_size: f32,
+    title_lines: Vec<String>,
+    has_label: bool,
+    has_subtitle: bool,
+}
+
+fn measure_caption(ctx: &RenderContext<'_>) -> CaptionLayout {
     let c_w = ctx.canvas_w as f32;
+    let pad_x = c_w * 0.08;
+    let label_size = c_w * 0.028;
+    let title_size = c_w * 0.095;
+    let subtitle_size = c_w * 0.038;
+    let top = c_w * 0.10;
+
+    let mut cursor_y = top;
+    let has_label = !ctx.slide.label.is_empty();
+    if has_label {
+        cursor_y += label_size * 1.65;
+    }
+
+    let title_lines: Vec<String> = ctx.slide.title.lines().map(str::to_string).collect();
+    cursor_y += c_w * 0.042;
+
+    cursor_y += title_size * title_lines.len().max(1) as f32 * 1.05;
+
+    let has_subtitle = !ctx.slide.subtitle.is_empty();
+    if has_subtitle {
+        cursor_y += title_size * 0.18;
+        cursor_y += subtitle_size * 1.25;
+    }
+
+    CaptionLayout {
+        pad_x,
+        top,
+        bottom: cursor_y,
+        width: c_w * 0.9,
+        label_size,
+        title_size,
+        subtitle_size,
+        title_lines,
+        has_label,
+        has_subtitle,
+    }
+}
+
+/// Relative luminance 0–1 in the caption text region.
+fn caption_region_luminance(canvas: &RgbaImage, cap: &CaptionLayout) -> f32 {
+    let x0 = cap.pad_x.floor().max(0.0) as u32;
+    let y0 = (cap.top - cap.label_size).floor().max(0.0) as u32;
+    let x1 = (cap.pad_x + cap.width).min(canvas.width() as f32) as u32;
+    let y1 = (cap.bottom + cap.subtitle_size * 0.4)
+        .min(canvas.height() as f32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+
+    let mut sum = 0.0f64;
+    let mut n = 0u64;
+    let step = ((x1 - x0) / 24).max(1);
+    let ystep = ((y1 - y0) / 16).max(1);
+
+    for y in (y0..y1).step_by(ystep as usize) {
+        for x in (x0..x1).step_by(step as usize) {
+            let p = canvas.get_pixel(x, y);
+            let r = p[0] as f64 / 255.0;
+            let g = p[1] as f64 / 255.0;
+            let b = p[2] as f64 / 255.0;
+            sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        (sum / n as f64) as f32
+    }
+}
+
+/// Darken the caption column when the background is bright behind text.
+fn draw_caption_scrim(canvas: &mut RgbaImage, cap: &CaptionLayout, luminance: f32, brand_bg: &str) {
+    let tint = parse_hex_color(brand_bg).unwrap_or([11, 13, 18, 255]);
+    let base = 0.38f32;
+    let extra = ((luminance - 0.28) * 1.35).max(0.0);
+    let strength = (base + extra).min(0.92);
+
+    let x0 = 0u32;
+    let y0 = cap.top.floor().max(0.0) as u32;
+    let x1 = (cap.pad_x + cap.width + cap.pad_x * 0.5)
+        .min(canvas.width() as f32) as u32;
+    let y1 = (cap.bottom + cap.subtitle_size * 0.55)
+        .min(canvas.height() as f32) as u32;
+    let h = (y1.saturating_sub(y0)).max(1) as f32;
+
+    for y in y0..y1 {
+        let t = (y - y0) as f32 / h;
+        // Strongest at top; fade out toward phone.
+        let fade = (1.0 - t).powf(1.35);
+        let alpha = (strength * (0.65 + 0.35 * fade) * 255.0).round() as u8;
+        if alpha == 0 {
+            continue;
+        }
+        let scrim = Rgba([tint[0], tint[1], tint[2], alpha]);
+        for x in x0..x1 {
+            let dst = *canvas.get_pixel(x, y);
+            canvas.put_pixel(x, y, alpha_blend(dst, scrim));
+        }
+    }
+}
+
+fn adapt_subtitle_color(muted: [u8; 4], fg: [u8; 4], luminance: f32) -> Rgba<u8> {
+    let t = ((luminance - 0.32) * 1.6).clamp(0.0, 1.0);
+    let blend = |m: u8, f: u8| -> u8 {
+        let t = t * 0.75;
+        (m as f32 + (f as f32 - m as f32) * t).round() as u8
+    };
+    Rgba([
+        blend(muted[0], fg[0]),
+        blend(muted[1], fg[1]),
+        blend(muted[2], fg[2]),
+        255,
+    ])
+}
+
+/// Returns the Y coordinate (px) just below the caption block.
+fn draw_caption_text(
+    ctx: &RenderContext<'_>,
+    canvas: &mut RgbaImage,
+    cap: &CaptionLayout,
+    luminance: f32,
+) -> Result<f32> {
     let fg = parse_hex_color(&ctx.cfg.brand.foreground).unwrap_or([23, 23, 23, 255]);
     let muted = parse_hex_color(
         ctx.cfg
@@ -89,54 +227,60 @@ fn draw_caption(ctx: &RenderContext<'_>, canvas: &mut RgbaImage) -> Result<f32> 
     )
     .unwrap_or([107, 114, 128, 255]);
     let accent = parse_hex_color(&ctx.cfg.brand.accent).unwrap_or([91, 124, 250, 255]);
+    let subtitle_color = adapt_subtitle_color(muted, fg, luminance);
 
-    let pad_x = c_w * 0.08;
-    let label_size = c_w * 0.028;
-    let title_size = c_w * 0.095;
-    let subtitle_size = c_w * 0.038;
-    let y = c_w * 0.10;
+    let mut cursor_y = cap.top;
 
-    let mut cursor_y = y;
-
-    if !ctx.slide.label.is_empty() {
+    if cap.has_label {
         ctx.fonts.draw_multiline(
             canvas,
             &[ctx.slide.label.as_str()],
-            pad_x,
+            cap.pad_x,
             cursor_y,
-            label_size,
+            cap.label_size,
             Rgba(accent),
             1.1,
         )?;
-        cursor_y += label_size * 1.65;
+        cursor_y += cap.label_size * 1.65;
     }
 
-    let title_lines: Vec<&str> = ctx.slide.title.lines().collect();
-    cursor_y += c_w * 0.042;
+    cursor_y += ctx.canvas_w as f32 * 0.042;
 
+    let title_line_refs: Vec<&str> = cap.title_lines.iter().map(String::as_str).collect();
     ctx.fonts.draw_multiline(
         canvas,
-        &title_lines,
-        pad_x,
+        &title_line_refs,
+        cap.pad_x,
         cursor_y,
-        title_size,
+        cap.title_size,
         Rgba(fg),
         1.05,
     )?;
-    cursor_y += title_size * title_lines.len() as f32 * 1.05;
+    cursor_y += cap.title_size * cap.title_lines.len().max(1) as f32 * 1.05;
 
-    if !ctx.slide.subtitle.is_empty() {
-        cursor_y += title_size * 0.18;
+    if cap.has_subtitle {
+        cursor_y += cap.title_size * 0.18;
+        let shadow = Rgba([0, 0, 0, (120.0 + luminance * 80.0) as u8]);
+        let shadow_off = (ctx.canvas_w as f32 * 0.003).max(2.0);
         ctx.fonts.draw_multiline(
             canvas,
             &[ctx.slide.subtitle.as_str()],
-            pad_x,
-            cursor_y,
-            subtitle_size,
-            Rgba(muted),
+            cap.pad_x + shadow_off,
+            cursor_y + shadow_off,
+            cap.subtitle_size,
+            shadow,
             1.2,
         )?;
-        cursor_y += subtitle_size * 1.25;
+        ctx.fonts.draw_multiline(
+            canvas,
+            &[ctx.slide.subtitle.as_str()],
+            cap.pad_x,
+            cursor_y,
+            cap.subtitle_size,
+            subtitle_color,
+            1.2,
+        )?;
+        cursor_y += cap.subtitle_size * 1.25;
     }
 
     Ok(cursor_y)
@@ -283,5 +427,27 @@ mod tests {
         let clipped = clip_rounded_rect(&img, 0.1, 0.1);
         assert_eq!(*clipped.get_pixel(50, 50), Rgba([255, 0, 0, 255]));
         assert_eq!(clipped.get_pixel(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn bright_region_gets_stronger_scrim() {
+        let mut bright = RgbaImage::from_pixel(400, 400, Rgba([240, 240, 250, 255]));
+        let cap = CaptionLayout {
+            pad_x: 32.0,
+            top: 40.0,
+            bottom: 200.0,
+            width: 320.0,
+            label_size: 12.0,
+            title_size: 40.0,
+            subtitle_size: 16.0,
+            title_lines: vec!["Hi".into()],
+            has_label: true,
+            has_subtitle: true,
+        };
+        let lum = caption_region_luminance(&bright, &cap);
+        assert!(lum > 0.8);
+        draw_caption_scrim(&mut bright, &cap, lum, "#0b0d12");
+        let after = bright.get_pixel(50, 60);
+        assert!(after[0] < 200);
     }
 }
