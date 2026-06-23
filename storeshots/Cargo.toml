@@ -1,0 +1,28 @@
+[package]
+name = "storeshots"
+version = "0.1.0"
+edition = "2021"
+description = "Generate App Store marketing screenshots from raw captures with AI backgrounds"
+include = ["src/**/*", "assets/**/*", "Cargo.toml"]
+
+[[bin]]
+name = "storeshots"
+path = "src/main.rs"
+
+[dependencies]
+ab_glyph = "0.2"
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+colored = "2"
+dirs = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rayon = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8"
+walkdir = "2"
