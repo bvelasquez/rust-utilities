@@ -8,6 +8,8 @@ pub const SC_LEFT: f32 = 52.0 / MK_W;
 pub const SC_TOP: f32 = 46.0 / MK_H;
 pub const SC_WIDTH: f32 = 918.0 / MK_W;
 pub const SC_HEIGHT: f32 = 1990.0 / MK_H;
+pub const SC_RX: f32 = 126.0 / 918.0;
+pub const SC_RY: f32 = 126.0 / 1990.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {
@@ -30,15 +32,22 @@ pub fn phone_width_fraction(canvas_w: u32, canvas_h: u32, clamp: f32) -> f32 {
     (0.72 * (ch / cw) * MK_RATIO).min(clamp)
 }
 
-/// Hero slide: centered phone, bottom-anchored with slight downward offset.
-pub fn hero_phone_placement(canvas_w: u32, canvas_h: u32) -> PhonePlacement {
+/// Hero slide: phone sits below the caption block with a modest gap.
+pub fn hero_phone_placement(canvas_w: u32, canvas_h: u32, caption_bottom: f32) -> PhonePlacement {
     let frac = phone_width_fraction(canvas_w, canvas_h, 0.84);
     let mock_w = (canvas_w as f32 * frac).round() as u32;
     let mock_h = (mock_w as f32 * (MK_H / MK_W)).round() as u32;
 
     let x = (canvas_w - mock_w) / 2;
-    let y_offset = (canvas_h as f32 * 0.13).round() as u32;
-    let y = canvas_h.saturating_sub(mock_h).saturating_add(y_offset);
+    let gap = canvas_w as f32 * 0.015;
+    let mut y = (caption_bottom + gap).round() as i32;
+
+    // Slight bottom bleed (skill uses ~6% vs 13%) so the device feels grounded.
+    let max_y = canvas_h as i32 - mock_h as i32 + (canvas_h as f32 * 0.06).round() as i32;
+    if y > max_y {
+        y = max_y;
+    }
+    let y = y.max(0) as u32;
 
     let screen = screen_rect_in_mockup(x, y, mock_w, mock_h);
     PhonePlacement {

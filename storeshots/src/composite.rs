@@ -1,6 +1,6 @@
 use crate::background::{load_or_generate_background, parse_hex_color, BackgroundOptions};
 use crate::config::{SlideItem, StoreshotsConfig};
-use crate::devices::hero_phone_placement;
+use crate::devices::{hero_phone_placement, Rect, SC_RX, SC_RY};
 use crate::fonts::FontSet;
 use crate::gemini::GeminiClient;
 use crate::sizes::{IPHONE_DESIGN_H, IPHONE_DESIGN_W};
@@ -36,9 +36,9 @@ pub async fn render_slide(ctx: RenderContext<'_>) -> Result<RgbaImage> {
     })
     .await?;
 
-    draw_caption(&ctx, &mut canvas)?;
+    let caption_bottom = draw_caption(&ctx, &mut canvas)?;
 
-    let placement = hero_phone_placement(ctx.canvas_w, ctx.canvas_h);
+    let placement = hero_phone_placement(ctx.canvas_w, ctx.canvas_h, caption_bottom);
     let raw_path = StoreshotsConfig::raw_path(ctx.app_root, &ctx.slide.raw);
     let screenshot = image::open(&raw_path)
         .with_context(|| format!("open screenshot {}", raw_path.display()))?
@@ -53,21 +53,31 @@ pub async fn render_slide(ctx: RenderContext<'_>) -> Result<RgbaImage> {
         placement.mockup.h,
         imageops::FilterType::Lanczos3,
     );
-    overlay_image_alpha(&mut canvas, &mockup_scaled, placement.mockup.x, placement.mockup.y);
 
     let screen = &placement.screen;
-    let fitted = imageops::resize(
-        &screenshot,
-        screen.w,
-        screen.h,
-        imageops::FilterType::Lanczos3,
-    );
-    overlay_image(&mut canvas, &fitted, screen.x, screen.y);
+    let inset = ((screen.w as f32) * 0.008).max(2.0).round() as u32;
+    let sw = screen.w.saturating_sub(inset * 2);
+    let sh = screen.h.saturating_sub(inset * 2);
+    let sx = screen.x + inset;
+    let sy = screen.y + inset;
 
-  Ok(canvas)
+    let fitted = imageops::resize(&screenshot, sw, sh, imageops::FilterType::Lanczos3);
+    let clipped = clip_rounded_rect(&fitted, SC_RX * 1.06, SC_RY * 1.06);
+    overlay_image_alpha(&mut canvas, &clipped, sx, sy);
+
+    overlay_mockup_frame(
+        &mut canvas,
+        &mockup_scaled,
+        placement.mockup.x,
+        placement.mockup.y,
+        screen,
+    );
+
+    Ok(canvas)
 }
 
-fn draw_caption(ctx: &RenderContext<'_>, canvas: &mut RgbaImage) -> Result<()> {
+/// Returns the Y coordinate (px) just below the caption block.
+fn draw_caption(ctx: &RenderContext<'_>, canvas: &mut RgbaImage) -> Result<f32> {
     let c_w = ctx.canvas_w as f32;
     let fg = parse_hex_color(&ctx.cfg.brand.foreground).unwrap_or([23, 23, 23, 255]);
     let muted = parse_hex_color(
@@ -84,58 +94,132 @@ fn draw_caption(ctx: &RenderContext<'_>, canvas: &mut RgbaImage) -> Result<()> {
     let label_size = c_w * 0.028;
     let title_size = c_w * 0.095;
     let subtitle_size = c_w * 0.038;
-    let y = c_w * 0.12;
+    let y = c_w * 0.10;
+
+    let mut cursor_y = y;
 
     if !ctx.slide.label.is_empty() {
         ctx.fonts.draw_multiline(
             canvas,
             &[ctx.slide.label.as_str()],
             pad_x,
-            y,
+            cursor_y,
             label_size,
             Rgba(accent),
             1.1,
         )?;
+        cursor_y += label_size * 1.65;
     }
 
     let title_lines: Vec<&str> = ctx.slide.title.lines().collect();
-    let title_y = y + label_size * 2.2;
+    cursor_y += c_w * 0.042;
+
     ctx.fonts.draw_multiline(
         canvas,
         &title_lines,
         pad_x,
-        title_y,
+        cursor_y,
         title_size,
         Rgba(fg),
         1.05,
     )?;
+    cursor_y += title_size * title_lines.len() as f32 * 1.05;
 
     if !ctx.slide.subtitle.is_empty() {
-        let sub_y = title_y + title_size * title_lines.len() as f32 * 1.15 + title_size * 0.25;
+        cursor_y += title_size * 0.18;
         ctx.fonts.draw_multiline(
             canvas,
             &[ctx.slide.subtitle.as_str()],
             pad_x,
-            sub_y,
+            cursor_y,
             subtitle_size,
             Rgba(muted),
             1.2,
         )?;
+        cursor_y += subtitle_size * 1.25;
     }
 
-    Ok(())
+    Ok(cursor_y)
 }
 
-fn overlay_image(canvas: &mut RgbaImage, src: &RgbaImage, x: u32, y: u32) {
-    for sy in 0..src.height() {
-        for sx in 0..src.width() {
-            let dx = x + sx;
-            let dy = y + sy;
-            if dx < canvas.width() && dy < canvas.height() {
-                canvas.put_pixel(dx, dy, *src.get_pixel(sx, sy));
+/// Draw the device bezel over the screenshot; skip opaque screen-fill pixels so UI shows through.
+fn overlay_mockup_frame(
+    canvas: &mut RgbaImage,
+    mockup: &RgbaImage,
+    mx: u32,
+    my: u32,
+    screen: &Rect,
+) {
+    for sy in 0..mockup.height() {
+        for sx in 0..mockup.width() {
+            let dx = mx + sx;
+            let dy = my + sy;
+            if dx >= canvas.width() || dy >= canvas.height() {
+                continue;
+            }
+            let sp = *mockup.get_pixel(sx, sy);
+            if sp[3] == 0 {
+                continue;
+            }
+
+            let in_screen = dx >= screen.x
+                && dx < screen.x + screen.w
+                && dy >= screen.y
+                && dy < screen.y + screen.h;
+
+            if in_screen && (is_screen_fill(sp) || sp[3] < 40) {
+                continue;
+            }
+
+            let dp = *canvas.get_pixel(dx, dy);
+            canvas.put_pixel(dx, dy, alpha_blend(dp, sp));
+        }
+    }
+}
+
+fn is_screen_fill(p: Rgba<u8>) -> bool {
+    p[3] > 180 && p[0] < 40 && p[1] < 40 && p[2] < 40
+}
+
+/// Rounded-rect alpha mask so screenshot corners sit cleanly under the bezel.
+fn clip_rounded_rect(img: &RgbaImage, rx_frac: f32, ry_frac: f32) -> RgbaImage {
+    let w = img.width();
+    let h = img.height();
+    let rx = (w as f32 * rx_frac).max(1.0);
+    let ry = (h as f32 * ry_frac).max(1.0);
+    let mut out = img.clone();
+
+    for y in 0..h {
+        for x in 0..w {
+            let xf = x as f32 + 0.5;
+            let yf = y as f32 + 0.5;
+            if !inside_rounded_rect(xf, yf, w as f32, h as f32, rx, ry) {
+                out.put_pixel(x, y, Rgba([0, 0, 0, 0]));
             }
         }
     }
+    out
+}
+
+fn inside_rounded_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> bool {
+    let qx = if x < rx {
+        rx - x
+    } else if x > w - rx {
+        x - (w - rx)
+    } else {
+        0.0
+    };
+    let qy = if y < ry {
+        ry - y
+    } else if y > h - ry {
+        y - (h - ry)
+    } else {
+        0.0
+    };
+    if qx == 0.0 || qy == 0.0 {
+        return true;
+    }
+    (qx * qx) / (rx * rx) + (qy * qy) / (ry * ry) <= 1.0
 }
 
 fn overlay_image_alpha(canvas: &mut RgbaImage, src: &RgbaImage, x: u32, y: u32) {
@@ -191,5 +275,13 @@ mod tests {
     #[test]
     fn mockup_embedded() {
         assert!(!mockup_bytes().is_empty());
+    }
+
+    #[test]
+    fn rounded_clip_preserves_center() {
+        let img = RgbaImage::from_pixel(100, 100, Rgba([255, 0, 0, 255]));
+        let clipped = clip_rounded_rect(&img, 0.1, 0.1);
+        assert_eq!(*clipped.get_pixel(50, 50), Rgba([255, 0, 0, 255]));
+        assert_eq!(clipped.get_pixel(0, 0)[3], 0);
     }
 }
