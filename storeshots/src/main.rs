@@ -250,10 +250,19 @@ async fn cmd_render(
 
     let use_ai = cfg.ai.backgrounds && !no_ai;
     let client = if use_ai {
-        Some(gemini::GeminiClient::from_env()?)
+        match gemini::GeminiClient::from_env() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!(
+                    "warning: {e}; rendering with gradient backgrounds instead"
+                );
+                None
+            }
+        }
     } else {
         None
     };
+    let use_ai = use_ai && client.is_some();
 
     let fonts = fonts::FontSet::load(&root, cfg.brand.font.as_deref())?;
     let (design_w, design_h) = composite::design_canvas_for_iphone();
