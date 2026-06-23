@@ -4,12 +4,15 @@ pub const MK_H: f32 = 2082.0;
 pub const MK_RATIO: f32 = MK_W / MK_H;
 
 /// Screen inset within mockup (fractions of mockup width/height).
-pub const SC_LEFT: f32 = 52.0 / MK_W;
-pub const SC_TOP: f32 = 46.0 / MK_H;
-pub const SC_WIDTH: f32 = 918.0 / MK_W;
-pub const SC_HEIGHT: f32 = 1990.0 / MK_H;
-pub const SC_RX: f32 = 126.0 / 918.0;
-pub const SC_RY: f32 = 126.0 / 1990.0;
+/// Measured from opaque screen-fill pixels in `assets/mockup.png` (not the
+/// smaller visible window from the Next.js skill — that leaves gaps when the
+/// screenshot is drawn beneath the frame and screen-fill pixels are skipped).
+pub const SC_LEFT: f32 = 20.0 / MK_W;
+pub const SC_TOP: f32 = 14.0 / MK_H;
+pub const SC_WIDTH: f32 = 982.0 / MK_W;
+pub const SC_HEIGHT: f32 = 2054.0 / MK_H;
+pub const SC_RX: f32 = 126.0 / 982.0;
+pub const SC_RY: f32 = 126.0 / 2054.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {

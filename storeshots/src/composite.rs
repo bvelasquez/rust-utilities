@@ -58,15 +58,15 @@ pub async fn render_slide(ctx: RenderContext<'_>) -> Result<RgbaImage> {
     );
 
     let screen = &placement.screen;
-    let inset = ((screen.w as f32) * 0.008).max(2.0).round() as u32;
-    let sw = screen.w.saturating_sub(inset * 2);
-    let sh = screen.h.saturating_sub(inset * 2);
-    let sx = screen.x + inset;
-    let sy = screen.y + inset;
+    let bleed = ((screen.w as f32) * 0.003).max(1.5).round() as u32;
+    let draw_w = screen.w + bleed * 2;
+    let draw_h = screen.h + bleed * 2;
+    let draw_x = screen.x.saturating_sub(bleed);
+    let draw_y = screen.y.saturating_sub(bleed);
 
-    let fitted = imageops::resize(&screenshot, sw, sh, imageops::FilterType::Lanczos3);
-    let clipped = clip_rounded_rect(&fitted, SC_RX * 1.06, SC_RY * 1.06);
-    overlay_image_alpha(&mut canvas, &clipped, sx, sy);
+    let fitted = resize_cover_top(&screenshot, draw_w, draw_h);
+    let clipped = clip_rounded_rect(&fitted, SC_RX, SC_RY);
+    overlay_image_alpha(&mut canvas, &clipped, draw_x, draw_y);
 
     overlay_mockup_frame(
         &mut canvas,
@@ -311,7 +311,7 @@ fn overlay_mockup_frame(
                 && dy >= screen.y
                 && dy < screen.y + screen.h;
 
-            if in_screen && (is_screen_fill(sp) || sp[3] < 40) {
+            if in_screen && is_screen_fill(sp) {
                 continue;
             }
 
@@ -322,7 +322,21 @@ fn overlay_mockup_frame(
 }
 
 fn is_screen_fill(p: Rgba<u8>) -> bool {
-    p[3] > 180 && p[0] < 40 && p[1] < 40 && p[2] < 40
+    p[3] > 160 && p[0] < 48 && p[1] < 48 && p[2] < 48
+}
+
+/// Scale and crop to exactly fill the target rect (no letterboxing).
+fn resize_cover_top(img: &RgbaImage, tw: u32, th: u32) -> RgbaImage {
+    let sw = img.width().max(1) as f32;
+    let sh = img.height().max(1) as f32;
+    let scale = (tw as f32 / sw).max(th as f32 / sh);
+    let nw = (sw * scale).ceil() as u32;
+    let nh = (sh * scale).ceil() as u32;
+    let resized = imageops::resize(img, nw, nh, imageops::FilterType::Lanczos3);
+    let x0 = nw.saturating_sub(tw) / 2;
+    // Match skill `object-position: top` so status bar stays under the bezel.
+    let y0 = 0;
+    imageops::crop_imm(&resized, x0, y0, tw, th).to_image()
 }
 
 /// Rounded-rect alpha mask so screenshot corners sit cleanly under the bezel.
