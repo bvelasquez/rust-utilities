@@ -11,10 +11,11 @@ pub struct GeminiClient {
 }
 
 impl GeminiClient {
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-            .context("set GEMINI_API_KEY or GOOGLE_API_KEY for AI features")?;
+    pub fn new(api_key: impl Into<String>) -> Result<Self> {
+        let api_key = api_key.into();
+        if api_key.trim().is_empty() {
+            anyhow::bail!("Gemini API key is empty");
+        }
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))

@@ -1,0 +1,11 @@
+{
+  "operations": [
+    {
+      "updateMask": "status",
+      "update": {
+        "resourceName": "customers/CUSTOMER_ID/campaigns/CAMPAIGN_ID",
+        "status": "PAUSED"
+      }
+    }
+  ]
+}

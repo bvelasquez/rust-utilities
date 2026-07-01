@@ -1,0 +1,5 @@
+default_customer_id = "1234567890"
+# login_customer_id = "9876543210"  # MCC manager ID if needed
+
+[aliases]
+# workout = "1234567890"

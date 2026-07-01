@@ -1,97 +1,251 @@
 # storeshots
 
-Generate App Store marketing screenshots from raw iOS simulator captures — headlines, AI-generated backgrounds, and a photoreal iPhone frame — without a browser or manual design work.
+Generate marketing assets from project source, brand boards, and raw captures — brand guides, App Store screenshots, and (soon) print materials.
 
-Raw PNGs stay pixel-perfect under the bezel. Copy and backgrounds are driven by a `storeshots.toml` config in your app repo, so renders are repeatable and automatable.
-
-## What it does
-
-- Scaffolds `storeshots.toml`, `storeshots/raw/`, and output folders in an app project
-- Composites each slide: caption (label, title, subtitle) + device mockup + screenshot
-- Generates AI backgrounds via Gemini (gradient fallback when no API key)
-- Suggests marketing copy with `copy suggest`
-- Exports all required iPhone display sizes for App Store Connect
-- Validates output PNG dimensions
-
-**v0.1:** iPhone only. iPad, Android, and Play Store feature graphics are planned.
+Pure Rust compositing for mobile slides. OpenRouter or Gemini for copy and brand extraction. Gemini for AI slide backgrounds.
 
 ## Install
 
 ```bash
+cd utilities/storeshots
 cargo build --release
-# binary: target/release/storeshots
+
+# Put `storeshots` on your PATH (~/.cargo/bin):
+cargo install --path . --force
 ```
 
-## Workflow
+Verify: `storeshots --version` → should print `0.3.0`.
 
-**1. Initialize in your app repo:**
+Without install, run directly: `./target/release/storeshots --help`
+
+## Interactive mode (humans)
+
+From an app repo (or any directory with `storeshots.toml`):
+
+```bash
+storeshots interactive
+# alias:
+storeshots i
+
+# or just run with no subcommand in a terminal:
+storeshots
+```
+
+The session stays open until you choose **Quit (q)**. Each action shows progress (`→` starting, `✓` done, `✗` on error) and returns to the main menu. Use **Change project folder** to point at a different app repo.
+
+Agents should keep using explicit subcommands with `--json`.
+
+**Where config files live:** `storeshots.toml` and `storeshots/secrets.toml` belong in **each app repo** (e.g. `soki-creative/`, `simple-food-track/`), not inside `utilities/storeshots/` (that directory is only the CLI tool). Run `storeshots init` from your app root to scaffold them.
+
+A reference template ships with the CLI: [`templates/secrets.toml.example`](templates/secrets.toml.example).
+
+## Quick start
 
 ```bash
 cd ~/projects/my-app
 storeshots init --name "My App"
+# Add simulator PNGs to storeshots/raw/
+
+storeshots brand extract --yes          # docs/BRAND.md from source
+storeshots brand validate
+storeshots copy suggest --yes
+storeshots mobile render --all-sizes --yes
+storeshots mobile validate
+
+# Or run the default pipeline (brand → copy → mobile):
+storeshots run --only brand,copy,mobile --yes
 ```
 
-**2. Add raw simulator screenshots** (no bezel) to `storeshots/raw/`.
+## Custom LLM instructions (per phase)
 
-**3. Edit `storeshots.toml`** — map slides to raw files, set brand colors, write or generate copy:
+Append instructions without forking the CLI:
 
-```bash
-storeshots copy suggest --yes --features "workout tracking, muscle filters, analytics"
-```
+1. **Auto-discovered files** in `storeshots/prompts/`:
+   - `brand.append.md`
+   - `copy.append.md`
+   - `mobile-background.append.md`
+   - `print.append.md`
 
-**4. Render:**
-
-```bash
-export GEMINI_API_KEY=...   # optional; uses gradients if missing
-storeshots render --all-sizes --yes
-```
-
-**5. Validate:**
-
-```bash
-storeshots validate
-```
-
-Outputs go to `storeshots/out/apple/iphone/<size>/`.
-
-## Example `storeshots.toml`
+2. **Inline in `storeshots.toml`**:
 
 ```toml
-[app]
-name = "Simple Workout"
+[ai.prompts.copy]
+prompt_append = """
+Pain-first messaging. Never mention streaks or gamification.
+"""
 
-[brand]
-accent = "#3b82f6"
-background = "#0b0d12"
-foreground = "#ffffff"
-muted = "#9ca3af"
-theme = "dark"
-
-[stores]
-apple_iphone = true
-
-[ai]
-backgrounds = true
-image_model = "gemini-2.5-flash-image"
-text_model = "gemini-2.5-flash"
-
-[[slides.items]]
-id = "hero"
-label = "TRAINING"
-title = "Your workout,\ntracked"
-subtitle = "Log sets, reps, and progress in seconds"
-raw = "01-hero.png"
+[ai.prompts.brand]
+prompt_file = "storeshots/prompts/brand.append.md"
 ```
+
+3. **One-shot CLI flags**:
+
+```bash
+storeshots copy suggest --prompt-append "Keep headlines under 5 words per line." --yes
+storeshots brand extract --prompt-file ./brief.md --yes
+```
+
+**Precedence:** CLI flags → per-slide `prompt_append` → `[ai.prompts.{phase}]` → auto-discovered `.append.md` files.
+
+## Text vs image models
+
+Keys resolve **per project** (for cost tracking):
+
+| Priority | Source |
+|----------|--------|
+| 1 | `storeshots/secrets.toml` — gitignored, project-local |
+| 2 | Env var **names** in `[ai.keys]` (`openrouter_env`, `gemini_env`) |
+| 3 | `STORESHOTS_OPENROUTER_API_KEY` / `STORESHOTS_GEMINI_API_KEY` (global CLI keys) |
+| 4 | Legacy `OPENROUTER_API_KEY` / `GEMINI_API_KEY` |
+
+### Per-project secrets file (recommended)
+
+```bash
+cp storeshots/secrets.toml.example storeshots/secrets.toml
+# Edit storeshots/secrets.toml — never commit
+```
+
+```toml
+# storeshots/secrets.toml
+openrouter = "sk-or-v1-..."
+gemini = "..."
+```
+
+### Per-project env var names (CI / shell) — Option B
+
+**File:** `storeshots.toml` at the **root of your app repo** (same folder as `package.json` / `Cargo.toml`), not inside `utilities/storeshots`.
+
+```toml
+[ai.keys]
+secrets_file = "storeshots/secrets.toml"
+openrouter_env = "SOKI_CREATIVE_OPENROUTER_API_KEY"
+gemini_env = "SOKI_CREATIVE_GEMINI_API_KEY"
+```
+
+Then set those env vars in `.env.local` or CI (values never go in committed TOML):
+
+```bash
+export SOKI_CREATIVE_OPENROUTER_API_KEY=sk-or-v1-...
+export SOKI_CREATIVE_GEMINI_API_KEY=...
+```
+
+### Global storeshots CLI keys (optional fallback)
+
+```bash
+export STORESHOTS_OPENROUTER_API_KEY=sk-or-v1-...
+export STORESHOTS_GEMINI_API_KEY=...
+```
+
+```bash
+storeshots config keys --json   # full resolution order
+storeshots env schema --json
+```
+
+| Task | Provider | Key source |
+|------|----------|------------|
+| Brand extract, copy suggest | OpenRouter (default) | Project secrets / env |
+| Slide backgrounds | Gemini | Project secrets / env |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `init` | Create config and folder scaffold |
-| `copy suggest` | Generate slide copy via Gemini; use `--yes` to apply |
-| `render` | Composite all slides; `--all-sizes` for every iPhone size |
-| `validate` | Check output PNG dimensions |
-| `env schema` | List environment variables for automation |
+| `init` | Scaffold `storeshots.toml`, `storeshots/prompts/`, `docs/BRAND.md` |
+| `brand extract` | LLM → `docs/BRAND.md` from web source/CSS/copy |
+| `brand validate` | Check brand guide completeness |
+| `copy suggest` | Generate slide copy → `storeshots.toml` |
+| `mobile render` | Composite App Store screenshots |
+| `mobile validate` | Check output PNG dimensions |
+| `print render` | Tri-fold, single-page, business card → PNG + PDF |
+| `run` | Execute `[[pipeline.steps]]` from manifest |
+| `capabilities --json` | Machine discovery for agents |
+| `config schema --json` | TOML contract for agents |
+| `config keys --json` | API key resolution order and secrets file format |
+| `env schema --json` | Environment variables |
+
+Legacy aliases: `storeshots render` → `mobile render`, `storeshots validate` → `mobile validate`.
+
+## Project layout
+
+```
+my-app/
+├── storeshots.toml
+├── docs/BRAND.md
+└── storeshots/
+    ├── prompts/       # optional .append.md per phase
+    ├── raw/           # simulator PNGs (no bezel)
+    ├── assets/        # logo, web captures
+    └── out/
+        ├── mobile/apple/iphone/6.9"/...
+        └── print/           # brochures, cards (PNG + PDF)
+```
+
+## Print materials (`storeshots print render`)
+
+Pure Rust compositor at 300 DPI layout, exported at 2× (600 DPI PNG embedded in PDF). Copy is pulled from `docs/BRAND.md` with optional overrides in `[print.copy]`.
+
+```bash
+storeshots print render --format trifold --yes
+storeshots print render --format single-landscape --yes
+storeshots print render --format single-portrait --yes
+storeshots print render --format business-card --yes
+# business-card sides: --variant front|back|both (default both)
+```
+
+Formats: `trifold`, `single-landscape`, `single-portrait`, `business-card`.
+
+Optional in `storeshots.toml`:
+
+```toml
+[print]
+output_dir = "storeshots/out/print"
+dpi = 300
+export_scale = 2
+
+[print.copy]
+website = "https://soki-creative.com"
+qr_url = "https://soki-creative.com"
+contact_email = "sales@soki-creative.com"
+eyebrow = "B2B software studio"
+logo = "storeshots/assets/logo.png"   # optional PNG
+bullets = ["Custom bullet override"]
+```
+
+## Pipeline (`storeshots run`)
+
+Define steps in `storeshots.toml`:
+
+```toml
+[[pipeline.steps]]
+id = "brand"
+phase = "brand"
+enabled = true
+
+[[pipeline.steps]]
+id = "copy"
+phase = "copy"
+depends_on = ["brand"]
+
+[[pipeline.steps]]
+id = "mobile"
+phase = "mobile"
+depends_on = ["copy"]
+```
+
+```bash
+storeshots run --only brand,copy,mobile --yes
+```
+
+## Agent automation
+
+```bash
+storeshots capabilities --json
+storeshots config schema --json
+storeshots env schema --json
+storeshots brand extract --yes --json
+```
+
+All mutating commands require `--yes` (or `--dry-run` where supported) unless `--json` is passed in non-interactive contexts.
 
 ## iPhone export sizes
 
@@ -102,42 +256,8 @@ raw = "01-hero.png"
 | 6.3" | 1206 × 2622 |
 | 6.1" | 1125 × 2436 |
 
-Renders at 6.9" design resolution, then scales down for smaller sizes.
+## Roadmap
 
-## Environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | AI backgrounds and copy suggestions |
-| `STORESHOTS_MODEL_IMAGE` | Image model override |
-| `STORESHOTS_MODEL_TEXT` | Text model override |
-
-```bash
-storeshots env schema
-storeshots env schema --json
-```
-
-## Flags for automation
-
-- `--yes` — non-interactive (required for `render` and `copy suggest`)
-- `--json` — structured output envelope on supported commands
-- `--no-ai` — skip Gemini backgrounds, use brand gradient
-- `--only 1,3,6` — render specific slides (1-based indices)
-
-## Project layout (in your app repo)
-
-```
-my-app/
-├── storeshots.toml
-└── storeshots/
-    ├── raw/           # simulator PNGs (gitignored or committed — your choice)
-    ├── brand/         # optional custom font
-    └── out/           # generated marketing screenshots
-        └── apple/iphone/6.9"/...
-```
-
-## Tips
-
-- Capture screenshots on the largest simulator (iPhone 16 Pro Max / 17 Pro Max) for best downscale quality
-- Keep the top-left of backgrounds dark — storeshots adds an adaptive scrim for subtitle readability on bright AI backgrounds
-- Re-run `render --all-sizes --yes` after changing copy, raw captures, or brand colors
+- **v0.2:** brand extract, prompt appends, pipeline, OpenRouter, mobile alias, interactive mode
+- **v0.3:** Pure Rust print compositor (tri-fold, single-page, business cards)
+- **v0.4:** Android sizes, iPad, Play feature graphic

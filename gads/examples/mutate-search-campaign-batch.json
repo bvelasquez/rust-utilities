@@ -1,0 +1,44 @@
+{
+  "mutateOperations": [
+    {
+      "campaignBudgetOperation": {
+        "create": {
+          "resourceName": "customers/CUSTOMER_ID/campaignBudgets/-1",
+          "name": "Daily budget example",
+          "amountMicros": "10000000",
+          "deliveryMethod": "STANDARD",
+          "explicitlyShared": false
+        }
+      }
+    },
+    {
+      "campaignOperation": {
+        "create": {
+          "resourceName": "customers/CUSTOMER_ID/campaigns/-2",
+          "name": "Example Search campaign",
+          "status": "PAUSED",
+          "advertisingChannelType": "SEARCH",
+          "campaignBudget": "customers/CUSTOMER_ID/campaignBudgets/-1",
+          "networkSettings": {
+            "targetGoogleSearch": true,
+            "targetSearchNetwork": true,
+            "targetContentNetwork": false,
+            "targetPartnerSearchNetwork": false
+          },
+          "targetSpend": {}
+        }
+      }
+    },
+    {
+      "adGroupOperation": {
+        "create": {
+          "resourceName": "customers/CUSTOMER_ID/adGroups/-3",
+          "campaign": "customers/CUSTOMER_ID/campaigns/-2",
+          "name": "Example ad group",
+          "status": "PAUSED",
+          "type": "SEARCH_STANDARD"
+        }
+      }
+    }
+  ]
+}

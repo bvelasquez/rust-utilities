@@ -1,6 +1,6 @@
 [package]
 name = "storeshots"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "Generate App Store marketing screenshots from raw captures with AI backgrounds"
 include = ["src/**/*", "assets/**/*", "Cargo.toml"]
@@ -16,6 +16,9 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 colored = "2"
+dialoguer = "0.11"
+printpdf = { version = "0.9", default-features = false, features = ["png"] }
+qrcode = "0.14"
 dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rayon = "1"

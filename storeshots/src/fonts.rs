@@ -5,35 +5,53 @@ use std::path::Path;
 
 pub struct FontSet {
     regular: Vec<u8>,
+    bold: Vec<u8>,
+    bold_is_distinct: bool,
 }
 
 impl FontSet {
     pub fn load(app_root: &Path, font_config: Option<&str>) -> Result<Self> {
-        if let Some(spec) = font_config {
+        let regular = if let Some(spec) = font_config {
             let path = if spec.contains('/') || spec.contains('\\') {
                 app_root.join(spec)
             } else {
-                app_root.join("storeshots/brand").join(format!("{spec}.ttf"))
+                app_root.join(crate::config::BRAND_DIR).join(format!("{spec}.ttf"))
             };
             if path.is_file() {
-                let bytes = std::fs::read(&path)
-                    .with_context(|| format!("read font {}", path.display()))?;
-                return Ok(Self { regular: bytes });
+                std::fs::read(&path).with_context(|| format!("read font {}", path.display()))?
+            } else {
+                let alt = app_root.join(crate::config::BRAND_DIR).join("font.ttf");
+                if alt.is_file() {
+                    std::fs::read(&alt).with_context(|| format!("read font {}", alt.display()))?
+                } else {
+                    system_fallback_font()?
+                }
             }
-            let alt = app_root.join("storeshots/brand/font.ttf");
-            if alt.is_file() {
-                let bytes = std::fs::read(&alt)
-                    .with_context(|| format!("read font {}", alt.display()))?;
-                return Ok(Self { regular: bytes });
-            }
-        }
+        } else {
+            system_fallback_font()?
+        };
 
-        let bundled = system_fallback_font()?;
-        Ok(Self { regular: bundled })
+        let (bold, bold_is_distinct) = load_bold_font(app_root, font_config)
+            .map(|b| (b, true))
+            .unwrap_or_else(|| (regular.clone(), false));
+
+        Ok(Self {
+            regular,
+            bold,
+            bold_is_distinct,
+        })
     }
 
-    fn font(&self) -> Result<FontRef<'_>> {
+    pub(crate) fn font(&self) -> Result<FontRef<'_>> {
         FontRef::try_from_slice(&self.regular).context("parse font")
+    }
+
+    pub(crate) fn font_bold(&self) -> Result<FontRef<'_>> {
+        FontRef::try_from_slice(&self.bold).context("parse bold font")
+    }
+
+    pub(crate) fn has_bold_font(&self) -> bool {
+        self.bold_is_distinct
     }
 
     pub fn draw_multiline(
@@ -118,4 +136,47 @@ fn system_fallback_font() -> Result<Vec<u8>> {
         }
     }
     anyhow::bail!("no font found; add storeshots/brand/font.ttf or set brand.font in storeshots.toml")
+}
+
+fn load_bold_font(app_root: &Path, font_config: Option<&str>) -> Option<Vec<u8>> {
+    if let Some(spec) = font_config {
+        if spec.contains('/') || spec.contains('\\') {
+            let stem = app_root.join(spec);
+            if let Some(parent) = stem.parent() {
+                if let Some(name) = stem.file_stem().and_then(|s| s.to_str()) {
+                    for suffix in ["-Bold", "Bold", "-bold", "_Bold"] {
+                        let candidate = parent.join(format!("{name}{suffix}.ttf"));
+                        if candidate.is_file() {
+                            return std::fs::read(candidate).ok();
+                        }
+                    }
+                }
+            }
+        } else {
+            for name in [
+                format!("{spec}-Bold.ttf"),
+                format!("{spec}Bold.ttf"),
+                "font-bold.ttf".into(),
+            ] {
+                let candidate = app_root.join(crate::config::BRAND_DIR).join(&name);
+                if candidate.is_file() {
+                    return std::fs::read(candidate).ok();
+                }
+            }
+        }
+    }
+
+    for path in [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial-Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ] {
+        if Path::new(path).is_file() {
+            return std::fs::read(path).ok();
+        }
+    }
+    let _ = app_root;
+    None
 }
