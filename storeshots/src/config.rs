@@ -29,6 +29,8 @@ pub struct StoreshotsConfig {
     pub pipeline: PipelineSection,
     #[serde(default)]
     pub print: PrintSection,
+    #[serde(default)]
+    pub ads: AdsSection,
     pub slides: SlidesSection,
 }
 
@@ -311,6 +313,39 @@ fn default_bleed_h() -> f64 {
     2.125
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdsSection {
+    #[serde(default = "default_ads_out")]
+    pub output_dir: String,
+    #[serde(default)]
+    pub items: Vec<AdItem>,
+}
+
+fn default_ads_out() -> String {
+    "storeshots/out/ads".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdItem {
+    pub id: String,
+    pub raw: String,
+    pub headline: String,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub cta: String,
+    #[serde(default = "default_ad_layout")]
+    pub layout: String,
+    #[serde(default)]
+    pub format_groups: Vec<String>,
+    #[serde(default)]
+    pub prompt_append: Option<String>,
+}
+
+fn default_ad_layout() -> String {
+    "auto".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlidesSection {
     pub items: Vec<SlideItem>,
@@ -418,6 +453,10 @@ impl StoreshotsConfig {
         app_root.join(&self.print.output_dir)
     }
 
+    pub fn ads_out_dir(&self, app_root: &Path) -> PathBuf {
+        app_root.join(&self.ads.output_dir)
+    }
+
     pub fn default_pipeline(&self) -> Vec<PipelineStep> {
         if !self.pipeline.steps.is_empty() {
             return self.pipeline.steps.clone();
@@ -447,6 +486,12 @@ impl StoreshotsConfig {
                 enabled: false,
                 depends_on: vec!["copy".into()],
             },
+            PipelineStep {
+                id: "ads".into(),
+                phase: "ads".into(),
+                enabled: false,
+                depends_on: vec!["copy".into()],
+            },
         ]
     }
 }
@@ -464,6 +509,7 @@ pub fn default_config(app_name: &str) -> StoreshotsConfig {
         ai: AiSection::default(),
         pipeline: PipelineSection::default(),
         print: PrintSection::default(),
+        ads: AdsSection::default(),
         slides: SlidesSection {
             items: vec![
                 SlideItem {
@@ -509,6 +555,12 @@ depends_on = ["copy"]
 [[pipeline.steps]]
 id = "print"
 phase = "print"
+depends_on = ["copy"]
+enabled = false
+
+[[pipeline.steps]]
+id = "ads"
+phase = "ads"
 depends_on = ["copy"]
 enabled = false
 "#

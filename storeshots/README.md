@@ -1,6 +1,6 @@
 # storeshots
 
-Generate marketing assets from project source, brand boards, and raw captures — brand guides, App Store screenshots, and (soon) print materials.
+Generate marketing assets from project source, brand boards, raw captures, and paid ad layouts — brand guides, App Store screenshots, print materials, and multi-platform ads.
 
 Pure Rust compositing for mobile slides. OpenRouter or Gemini for copy and brand extraction. Gemini for AI slide backgrounds.
 
@@ -14,7 +14,7 @@ cargo build --release
 cargo install --path . --force
 ```
 
-Verify: `storeshots --version` → should print `0.3.0`.
+Verify: `storeshots --version` → should print `0.4.0`.
 
 Without install, run directly: `./target/release/storeshots --help`
 
@@ -38,6 +38,8 @@ Agents should keep using explicit subcommands with `--json`.
 **Where config files live:** `storeshots.toml` and `storeshots/secrets.toml` belong in **each app repo** (e.g. `soki-creative/`, `simple-food-track/`), not inside `utilities/storeshots/` (that directory is only the CLI tool). Run `storeshots init` from your app root to scaffold them.
 
 A reference template ships with the CLI: [`templates/secrets.toml.example`](templates/secrets.toml.example).
+
+**Cursor agents:** see [`skills/storeshots-cli/SKILL.md`](skills/storeshots-cli/SKILL.md) for the full agent skill (install to `~/.cursor/skills/storeshots-cli/`).
 
 ## Quick start
 
@@ -65,6 +67,7 @@ Append instructions without forking the CLI:
    - `copy.append.md`
    - `mobile-background.append.md`
    - `print.append.md`
+   - `ads.append.md`
 
 2. **Inline in `storeshots.toml`**:
 
@@ -157,6 +160,10 @@ storeshots env schema --json
 | `mobile render` | Composite App Store screenshots |
 | `mobile validate` | Check output PNG dimensions |
 | `print render` | Tri-fold, single-page, business card → PNG + PDF |
+| `ads formats` | List Google Ads, Display, Meta, and Play ad sizes |
+| `ads suggest` | LLM → ad layouts in `storeshots.toml` from raw screenshots |
+| `ads render` | Composite marketing ads at all platform sizes |
+| `ads validate` | Check ads output completeness |
 | `run` | Execute `[[pipeline.steps]]` from manifest |
 | `capabilities --json` | Machine discovery for agents |
 | `config schema --json` | TOML contract for agents |
@@ -178,6 +185,59 @@ my-app/
     └── out/
         ├── mobile/apple/iphone/6.9"/...
         └── print/           # brochures, cards (PNG + PDF)
+        └── ads/               # paid marketing (google-ads, meta, google-play)
+```
+
+## Marketing ads (`storeshots ads`)
+
+Uses Gemini (or OpenRouter) to plan conversion-focused ad concepts from your raw screenshots and brand guide, then composites them at platform-specific sizes with AI backgrounds.
+
+```bash
+# Add simulator PNGs to storeshots/raw/
+storeshots ads formats                    # list all sizes & groups
+storeshots ads suggest --yes              # LLM plans layouts → storeshots.toml
+storeshots ads render --yes               # render all ads to all format groups
+storeshots ads validate
+```
+
+### Format groups
+
+| Group | Sizes | Use |
+|-------|-------|-----|
+| `google-pmax` | 1200×628, 1200×1200, 960×1200 | Performance Max required images |
+| `google-display` | 300×250, 728×90, 970×250, etc. | Display Network / IAB |
+| `social` | 1080×1080, 1080×1920, 1200×628 | Meta feed, story, link ads |
+| `play-feature` | 1024×500 | Google Play feature graphic |
+| `all` | Every supported size | Maximum coverage |
+
+### Layouts
+
+The LLM picks a layout per ad (`auto` lets the renderer choose by aspect ratio):
+
+- `device-bottom` — portrait/square: headline top, phone mockup bottom
+- `device-center` — square: centered device
+- `device-right` / `device-left` — landscape: copy + screenshot side by side
+- `screenshot-hero` — full-bleed UI with text overlay (stories, feature graphic)
+- `text-banner` — wide banners: text + logo only
+
+### Config (`storeshots.toml`)
+
+```toml
+[ads]
+output_dir = "storeshots/out/ads"
+
+[[ads.items]]
+id = "hero-benefit"
+raw = "01-home.png"
+headline = "Log meals\nin seconds"
+subtitle = "No guilt. No spreadsheets."
+cta = "Try free"
+layout = "device-bottom"
+format_groups = ["google-pmax", "social"]
+```
+
+```bash
+storeshots ads render --only hero-benefit --formats google-pmax --yes
 ```
 
 ## Print materials (`storeshots print render`)
@@ -260,4 +320,5 @@ All mutating commands require `--yes` (or `--dry-run` where supported) unless `-
 
 - **v0.2:** brand extract, prompt appends, pipeline, OpenRouter, mobile alias, interactive mode
 - **v0.3:** Pure Rust print compositor (tri-fold, single-page, business cards)
-- **v0.4:** Android sizes, iPad, Play feature graphic
+- **v0.4:** Marketing ads — Google PMax, Display, Meta, Play feature graphic sizes; LLM layout planning
+- **v0.5:** Android sizes, iPad, additional store screenshots

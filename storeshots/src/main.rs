@@ -1,3 +1,4 @@
+mod ads;
 mod background;
 mod brand;
 mod cache;
@@ -71,6 +72,10 @@ enum Commands {
     Print {
         #[command(subcommand)]
         command: PrintCommands,
+    },
+    Ads {
+        #[command(subcommand)]
+        command: AdsCommands,
     },
     /// Alias for `mobile render`
     Render {
@@ -226,6 +231,45 @@ enum PrintCommands {
 }
 
 #[derive(Subcommand, Debug)]
+enum AdsCommands {
+    /// List supported ad sizes and format groups
+    Formats,
+    /// LLM → ad layouts in storeshots.toml [ads.items]
+    Suggest {
+        #[arg(long, short)]
+        app: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, action = clap::ArgAction::Append)]
+        prompt_append: Vec<String>,
+        #[arg(long, action = clap::ArgAction::Append)]
+        prompt_file: Vec<PathBuf>,
+    },
+    /// Render marketing ads to storeshots/out/ads/
+    Render {
+        #[arg(long, short)]
+        app: Option<PathBuf>,
+        #[arg(long)]
+        no_ai: bool,
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        #[arg(long, value_delimiter = ',', help = "Format group or format id filter")]
+        formats: Vec<String>,
+        #[arg(long, default_value = "en")]
+        locale: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Check ads output dimensions and completeness
+    Validate {
+        #[arg(long, short)]
+        app: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ConfigCommands {
     Schema,
     Keys,
@@ -317,6 +361,25 @@ async fn main() -> Result<()> {
                 variant,
                 yes,
             } => cmd_print_render(app, format, variant, yes, cli.json),
+        },
+        Some(Commands::Ads { command }) => match command {
+            AdsCommands::Formats => cmd_ads_formats(cli.json),
+            AdsCommands::Suggest {
+                app,
+                dry_run,
+                yes,
+                prompt_append,
+                prompt_file,
+            } => cmd_ads_suggest(app, dry_run, yes, prompt_append, prompt_file, cli.json).await,
+            AdsCommands::Render {
+                app,
+                no_ai,
+                only,
+                formats,
+                locale,
+                yes,
+            } => cmd_ads_render(app, no_ai, only, formats, locale, yes, cli.json).await,
+            AdsCommands::Validate { app } => cmd_ads_validate(app, cli.json),
         },
         Some(Commands::Render {
             app,
@@ -821,6 +884,28 @@ pub(crate) async fn cmd_run(
                 cmd_print_render(Some(root.clone()), "trifold".into(), None, true, json)?;
                 completed.push(step.id.clone());
             }
+            "ads" => {
+                cmd_ads_suggest(
+                    Some(root.clone()),
+                    false,
+                    true,
+                    prompt_append.clone(),
+                    prompt_file.clone(),
+                    json,
+                )
+                .await?;
+                cmd_ads_render(
+                    Some(root.clone()),
+                    no_ai,
+                    vec![],
+                    vec![],
+                    "en".into(),
+                    true,
+                    json,
+                )
+                .await?;
+                completed.push(step.id.clone());
+            }
             other => bail!("unknown pipeline phase: {other}"),
         }
     }
@@ -836,6 +921,158 @@ pub(crate) async fn cmd_run(
             "{} Pipeline completed: {}",
             "✓".green(),
             completed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn cmd_ads_suggest(
+    app: Option<PathBuf>,
+    dry_run: bool,
+    yes: bool,
+    prompt_append: Vec<String>,
+    prompt_file: Vec<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    require_yes(yes, json, dry_run)?;
+    let root = resolve_app_root(app)?;
+    let mut cfg = StoreshotsConfig::load_relaxed(&root)?;
+    let overrides = overrides_from_cli(&prompt_append, &prompt_file);
+    let suggested = ads::suggest_ads(&root, &cfg, &overrides).await?;
+
+    if dry_run {
+        if json {
+            Envelope::ok("ads suggest", &suggested).print_json()?;
+        } else {
+            println!("{}", serde_json::to_string_pretty(&suggested)?);
+        }
+        return Ok(());
+    }
+
+    ads::apply_ads(&mut cfg, &suggested);
+    cfg.save(&root)?;
+
+    if json {
+        Envelope::ok(
+            "ads suggest",
+            serde_json::json!({ "applied": true, "ads": suggested.ads }),
+        )
+        .with_next_actions(vec!["Run: storeshots ads render --yes".into()])
+        .print_json()?;
+    } else {
+        println!("{} Updated ad layouts in storeshots.toml", "✓".green());
+        for a in &suggested.ads {
+            println!(
+                "  {} — {} (groups: {})",
+                a.id.bold(),
+                a.headline.replace('\n', " / "),
+                a.format_groups.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn cmd_ads_render(
+    app: Option<PathBuf>,
+    no_ai: bool,
+    only: Vec<String>,
+    formats: Vec<String>,
+    locale: String,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    if !yes && !json {
+        bail!("use --yes to render ads (may call Gemini for backgrounds)");
+    }
+    let root = resolve_app_root(app)?;
+    let cfg = StoreshotsConfig::load_relaxed(&root)?;
+
+    let output = ads::render_ads(&root, &cfg, no_ai, &only, &formats, &locale).await?;
+
+    if json {
+        Envelope::ok(
+            "ads render",
+            serde_json::json!({
+                "files": output.files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "ads_rendered": output.ads_rendered,
+                "ai_backgrounds": cfg.ai.backgrounds && !no_ai,
+            }),
+        )
+        .print_json()?;
+    } else {
+        println!(
+            "{} Rendered {} ad file(s) for {} concept(s)",
+            "✓".green(),
+            output.files.len(),
+            output.ads_rendered
+        );
+        for p in &output.files {
+            println!("  {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_ads_validate(app: Option<PathBuf>, json: bool) -> Result<()> {
+    let root = resolve_app_root(app)?;
+    let cfg = StoreshotsConfig::load_relaxed(&root)?;
+    let issues = ads::validate_ads_output(&root, &cfg);
+
+    if json {
+        Envelope::ok(
+            "ads validate",
+            serde_json::json!({ "ok": issues.is_empty(), "issues": issues }),
+        )
+        .print_json()?;
+    } else if issues.is_empty() {
+        println!("{} All ad outputs look valid", "✓".green());
+    } else {
+        for issue in &issues {
+            println!("{} {} — {}", "✗".red(), issue.path, issue.message);
+        }
+        bail!("validation failed");
+    }
+
+    if !issues.is_empty() {
+        bail!("validation failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_ads_formats(json: bool) -> Result<()> {
+    let data = ads::formats_list_json();
+    if json {
+        Envelope::ok("ads formats", data).print_json()?;
+    } else {
+        println!("Supported ad format groups:\n");
+        if let Some(groups) = data.get("groups").and_then(|g| g.as_array()) {
+            for g in groups {
+                println!(
+                    "  {}  {}",
+                    g["id"].as_str().unwrap_or("").cyan().bold(),
+                    g["description"].as_str().unwrap_or("")
+                );
+            }
+            println!();
+        }
+        println!("Supported ad sizes:\n");
+        if let Some(formats) = data.get("formats").and_then(|f| f.as_array()) {
+            for f in formats {
+                println!(
+                    "  {}  {}×{}  [{} / {}]",
+                    f["id"].as_str().unwrap_or("").cyan(),
+                    f["width"].as_u64().unwrap_or(0),
+                    f["height"].as_u64().unwrap_or(0),
+                    f["platform"].as_str().unwrap_or(""),
+                    f["group"].as_str().unwrap_or(""),
+                );
+            }
+        }
+        println!(
+            "\nSuggest: {} {}",
+            "storeshots ads suggest --yes".dimmed(),
+            "| Render: storeshots ads render --yes".cyan()
         );
     }
     Ok(())

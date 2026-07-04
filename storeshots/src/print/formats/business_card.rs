@@ -165,7 +165,7 @@ fn render_back(ctx: &FormatContext<'_>, w: u32, h: u32) -> Result<image::RgbaIma
         }
     }
     canvas.draw_body_width(
-        "Full-stack · AI · Web · Mobile",
+        &ctx.copy.eyebrow,
         pad,
         h as f32 - pad - h as f32 * 0.08,
         h as f32 * 0.06,

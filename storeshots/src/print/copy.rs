@@ -30,7 +30,29 @@ impl PrintCopy {
 
     /// Headline sized for brochure panels (not the full BRAND.md tagline paragraph).
     pub fn print_headline(&self) -> String {
+        if !self.card_tagline.is_empty() {
+            return self
+                .card_tagline
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
         shorten_line(&self.tagline, 72)
+    }
+
+    /// Brochure cover / hero lines (2–3 short lines).
+    pub fn brochure_hero_lines(&self) -> Vec<String> {
+        self.hero_headline()
+    }
+
+    /// Short panel headline from the first feature or app name.
+    pub fn brochure_panel_headline(&self, fallback: &str) -> String {
+        self.print_features()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     /// Two-to-three sentence pitch for copy columns.
@@ -60,10 +82,33 @@ impl PrintCopy {
     }
 
     pub fn hero_headline(&self) -> Vec<String> {
+        if self.card_tagline.contains('\n') {
+            return self
+                .card_tagline
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .take(3)
+                .collect();
+        }
+        let words: Vec<&str> = self.card_tagline.split_whitespace().collect();
+        if words.len() <= 4 {
+            return vec![self.card_tagline.clone()];
+        }
+        let mid = words.len() / 2;
         vec![
-            "Production systems,".into(),
-            "not demo chatbots".into(),
+            words[..mid].join(" "),
+            words[mid..].join(" "),
         ]
+    }
+
+    pub fn hero_subline(&self) -> String {
+        shorten_to_sentence(&self.pitch, 120)
+    }
+
+    pub fn hero_cta(&self) -> &'static str {
+        "Get started"
     }
 }
 
@@ -281,7 +326,7 @@ fn card_bullet_label(s: &str) -> String {
     shorten_line(clause, 52)
 }
 
-fn card_features_from_brand(features: &[String], brand_text: &str) -> Vec<String> {
+fn card_features_from_brand(features: &[String], _brand_text: &str) -> Vec<String> {
     if features.is_empty() {
         return Vec::new();
     }
@@ -290,10 +335,7 @@ fn card_features_from_brand(features: &[String], brand_text: &str) -> Vec<String
         .take(2)
         .map(|f| card_feature_title(f))
         .collect();
-    let brand_l = brand_text.to_lowercase();
-    let third = if brand_l.contains("app store") || brand_l.contains("ios and android") {
-        "Deploy & Release Management".into()
-    } else if features.len() > 2 {
+    let third = if features.len() > 2 {
         card_feature_title(&features[2])
     } else {
         String::new()
@@ -306,15 +348,8 @@ fn card_features_from_brand(features: &[String], brand_text: &str) -> Vec<String
 
 fn card_feature_title(s: &str) -> String {
     let s = clean_md(s);
-    if let Some((title, desc)) = s.split_once(':') {
-        let title = clean_md(title);
-        let desc_l = desc.to_lowercase();
-        if title.to_lowercase().contains("full-stack")
-            && (desc_l.contains("react native") || desc_l.contains("react,"))
-        {
-            return format!("{title} (React, React Native)");
-        }
-        return title;
+    if let Some((title, _)) = s.split_once(':') {
+        return clean_md(title);
     }
     shorten_line(&s, 56)
 }

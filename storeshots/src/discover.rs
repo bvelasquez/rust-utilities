@@ -74,6 +74,10 @@ fn scaffold_prompt_stubs(app_root: &Path) -> Result<()> {
             "print.append.md",
             "# Print copy instructions\n\n<!-- Brochure/card tone and CTA rules -->\n",
         ),
+        (
+            "ads.append.md",
+            "# Ads layout instructions\n\n<!-- Paid social / Google Ads tone, angles to emphasize, words to avoid -->\n",
+        ),
     ];
     for (name, content) in stubs {
         let path = app_root.join(PROMPTS_DIR).join(name);

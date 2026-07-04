@@ -12,12 +12,10 @@ pub fn render(ctx: &FormatContext<'_>) -> Result<Vec<NamedPage>> {
     let pad = w as f32 * 0.07;
     let text_w = w as f32 - pad * 2.0;
     let footer_h = h as f32 * 0.24;
-    let content_max = h as f32 - footer_h - pad;
 
     let mut cy = pad;
     cy = draw_hero_block(&mut canvas, ctx, pad, cy, w, text_w)?;
-    cy = draw_features_block(&mut canvas, ctx, pad, cy, w, text_w)?;
-    draw_capabilities_block(&mut canvas, ctx, pad, cy, w, text_w, content_max)?;
+    let _ = draw_features_block(&mut canvas, ctx, pad, cy, w, text_w)?;
     draw_footer_block(&mut canvas, ctx, pad, h as f32 - footer_h, w, footer_h)?;
 
     Ok(vec![NamedPage {
@@ -84,7 +82,7 @@ fn draw_features_block(
     w: u32,
     text_w: f32,
 ) -> Result<f32> {
-    c.draw_eyebrow("What we deliver", pad, cy, w as f32 * 0.02, true)?;
+    c.draw_eyebrow("What you get", pad, cy, w as f32 * 0.02, true)?;
     cy += w as f32 * 0.038;
 
     let features = ctx.copy.print_features();
@@ -99,46 +97,6 @@ fn draw_features_block(
         text_w,
     )?;
     Ok(cy + bullet_size * 0.5)
-}
-
-fn draw_capabilities_block(
-    c: &mut Canvas<'_>,
-    ctx: &FormatContext<'_>,
-    pad: f32,
-    mut cy: f32,
-    w: u32,
-    text_w: f32,
-    content_max: f32,
-) -> Result<f32> {
-    if cy >= content_max {
-        return Ok(cy);
-    }
-
-    cy += w as f32 * 0.02;
-    c.draw_eyebrow("Capabilities", pad, cy, w as f32 * 0.02, true)?;
-    cy += w as f32 * 0.04;
-
-    let hero_size = w as f32 * 0.036;
-    let hero = "Web · mobile · AI · cloud";
-    c.draw_headline_width(hero, pad, cy, hero_size, true, true, text_w)?;
-    cy += c.measure_wrapped(&hero.to_uppercase(), hero_size, text_w, 1.08)? + hero_size * 0.4;
-
-    if cy >= content_max {
-        return Ok(cy);
-    }
-
-    let caps = capability_lines(ctx);
-    let cap_size = w as f32 * 0.023;
-    cy = c.draw_bullets(&caps, pad, cy, cap_size, true, caps.len(), text_w)?;
-    Ok(cy)
-}
-
-fn capability_lines(_ctx: &FormatContext<'_>) -> Vec<String> {
-    vec![
-        "Agentic systems with memory, routing, and operator controls".into(),
-        "React & React Native with Firebase and Python backends".into(),
-        "Health, coaching, and finance — production apps shipped".into(),
-    ]
 }
 
 fn draw_footer_block(

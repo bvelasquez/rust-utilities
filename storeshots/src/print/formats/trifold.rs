@@ -58,13 +58,18 @@ fn render_outside_left(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx: 
     let mut cy = y as f32 + pad;
     c.draw_eyebrow("Open fully to see", x as f32 + pad, cy, w as f32 * 0.032, false)?;
     cy += h as f32 * 0.06;
-    c.draw_headline_width("What we build", x as f32 + pad, cy, w as f32 * 0.072, false, false, text_w)?;
+    c.draw_headline_width(
+        "What you get",
+        x as f32 + pad,
+        cy,
+        w as f32 * 0.072,
+        false,
+        false,
+        text_w,
+    )?;
     cy += h as f32 * 0.12;
     c.draw_body_width(
-        &format!(
-            "Production AI, full-stack web & mobile, and cloud backends — one studio from design through deploy. {}",
-            ctx.copy.website_label
-        ),
+        &ctx.copy.print_pitch(),
         x as f32 + pad,
         cy,
         w as f32 * 0.038,
@@ -100,10 +105,10 @@ fn render_outside_center(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx
     let pad = w as f32 * 0.065;
     let text_w = panel_text_w(w, pad);
     let mut cy = y as f32 + pad;
-    c.draw_eyebrow("Work with us", x as f32 + pad, cy, w as f32 * 0.032, false)?;
+    c.draw_eyebrow("Works everywhere", x as f32 + pad, cy, w as f32 * 0.032, false)?;
     cy += h as f32 * 0.06;
     c.draw_headline_width(
-        "Soup to nuts delivery",
+        "Train on web & iOS",
         x as f32 + pad,
         cy,
         w as f32 * 0.068,
@@ -114,7 +119,7 @@ fn render_outside_center(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx
     cy += h as f32 * 0.12;
     c.draw_body_width(
         &format!(
-            "From React and React Native clients to Firebase and Python services — we ship coherent features across surfaces. {}",
+            "Log sessions, follow plans, and review progress from any device. Questions? {}",
             ctx.copy.contact_email
         ),
         x as f32 + pad,
@@ -124,12 +129,17 @@ fn render_outside_center(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx
         text_w,
     )?;
     cy += h as f32 * 0.14;
-    let items = vec![
-        "Production AI & agentic systems".into(),
-        "Web + mobile + cloud".into(),
-        "Fast iteration, real engineering".into(),
-        ctx.copy.contact_email.clone(),
-    ];
+    let features = ctx.copy.print_features();
+    let items: Vec<String> = if features.len() > 4 {
+        features.into_iter().skip(4).take(4).collect()
+    } else {
+        vec![
+            ctx.copy.website_label.clone(),
+            "Structured workout plans".into(),
+            "Exercise library".into(),
+            ctx.copy.contact_email.clone(),
+        ]
+    };
     c.draw_bullets(
         &items,
         x as f32 + pad,
@@ -167,16 +177,41 @@ fn render_outside_right(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx:
     cy += w as f32 * 0.14;
     c.draw_eyebrow(&ctx.copy.eyebrow, x as f32 + pad, cy, w as f32 * 0.022, true)?;
     cy += h as f32 * 0.045;
-    c.draw_headline_width(
-        &ctx.copy.print_headline(),
-        x as f32 + pad,
-        cy,
-        w as f32 * 0.038,
-        true,
-        false,
-        text_w,
-    )?;
-    cy += h as f32 * 0.14;
+
+    let hero = ctx.copy.brochure_hero_lines();
+    if hero.len() >= 2 {
+        c.draw_headline_width(
+            &hero[0],
+            x as f32 + pad,
+            cy,
+            w as f32 * 0.052,
+            true,
+            false,
+            text_w,
+        )?;
+        cy += h as f32 * 0.07;
+        c.draw_headline_width(
+            &hero[1..].join(" "),
+            x as f32 + pad,
+            cy,
+            w as f32 * 0.052,
+            true,
+            false,
+            text_w,
+        )?;
+        cy += h as f32 * 0.08;
+    } else {
+        c.draw_headline_width(
+            &ctx.copy.print_headline(),
+            x as f32 + pad,
+            cy,
+            w as f32 * 0.044,
+            true,
+            false,
+            text_w,
+        )?;
+        cy += h as f32 * 0.12;
+    }
 
     let qr_size = w as f32 * 0.54;
     let qr = render_qr(&ctx.copy.qr_url, 8)?;
@@ -206,13 +241,13 @@ fn render_inside_left(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx: &
     let pad = w as f32 * 0.07;
     let text_w = panel_text_w(w, pad);
     let mut cy = y as f32 + pad;
-    c.draw_eyebrow("Why teams call us", x as f32 + pad, cy, w as f32 * 0.03, false)?;
+    c.draw_eyebrow("Sound familiar?", x as f32 + pad, cy, w as f32 * 0.03, false)?;
     cy += h as f32 * 0.055;
     c.draw_headline_width(
-        "Demo chatbots aren't production.",
+        "Training without a system doesn't stick.",
         x as f32 + pad,
         cy,
-        w as f32 * 0.056,
+        w as f32 * 0.048,
         false,
         false,
         text_w,
@@ -220,9 +255,18 @@ fn render_inside_left(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx: &
     cy += h as f32 * 0.14;
 
     let pains = vec![
-        ("Prototype stall", "Ideas stuck in pilots without a path to ship."),
-        ("Fragmented vendors", "Design, mobile, backend, and AI owned by different teams."),
-        ("Ops blind spots", "No guardrails, memory, or operator controls in agentic systems."),
+        (
+            "Scattered logs",
+            "Sets and sessions live in notes, spreadsheets, or memory.",
+        ),
+        (
+            "No visible progress",
+            "Hard to spot trends when every workout looks different on paper.",
+        ),
+        (
+            "Plans fall apart",
+            "Without structure, it's easy to skip days or repeat the same lifts.",
+        ),
     ];
     for (title, body) in pains {
         c.draw_headline_width(title, x as f32 + pad, cy, w as f32 * 0.042, false, false, text_w)?;
@@ -231,14 +275,7 @@ fn render_inside_left(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx: &
         cy += h as f32 * 0.11;
     }
 
-    c.draw_body_width(
-        &ctx.copy.print_pitch(),
-        x as f32 + pad,
-        y as f32 + h as f32 - pad - w as f32 * 0.12,
-        w as f32 * 0.032,
-        false,
-        text_w,
-    )?;
+    let _ = &ctx.copy.name;
     Ok(())
 }
 
@@ -250,15 +287,22 @@ fn render_inside_hero(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx: &
     let mut cy = y as f32 + pad_top;
 
     c.draw_eyebrow(
-        &format!("Full stack · {}", ctx.copy.website_label),
+        &format!("{} · {}", ctx.copy.eyebrow, ctx.copy.website_label),
         x as f32 + pad_x,
         cy,
         h as f32 * 0.024,
         true,
     )?;
     cy += h as f32 * 0.05;
+
+    let hero = ctx.copy.brochure_hero_lines();
+    let headline = if hero.is_empty() {
+        ctx.copy.print_headline()
+    } else {
+        hero.join("\n")
+    };
     c.draw_headline_width(
-        "AI, web, mobile & cloud — one team",
+        &headline,
         x as f32 + pad_x,
         cy,
         h as f32 * 0.052,
@@ -266,7 +310,7 @@ fn render_inside_hero(c: &mut Canvas<'_>, x: u32, y: u32, w: u32, h: u32, ctx: &
         false,
         text_w,
     )?;
-    cy += h as f32 * 0.09;
+    cy += h as f32 * 0.11;
     c.draw_body_width(
         &ctx.copy.print_pitch(),
         x as f32 + pad_x,

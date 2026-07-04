@@ -1,5 +1,5 @@
 mod copy;
-mod draw;
+pub(crate) mod draw;
 mod formats;
 mod layout;
 mod pdf;

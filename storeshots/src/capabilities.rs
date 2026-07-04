@@ -1,12 +1,13 @@
 use serde_json::json;
 
+use crate::ads;
 use crate::print;
 
 pub fn capabilities_json() -> serde_json::Value {
     json!({
         "name": "storeshots",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Unified marketing asset CLI: brand boards, App Store screenshots, print (coming soon)",
+        "description": "Unified marketing asset CLI: brand boards, App Store screenshots, print, paid ads",
         "commands": [
             { "id": "init", "mutation": true, "requiresAuth": false },
             { "id": "brand extract", "mutation": true, "requiresAuth": "OPENROUTER_API_KEY or GEMINI_API_KEY" },
@@ -17,15 +18,20 @@ pub fn capabilities_json() -> serde_json::Value {
             { "id": "print formats", "mutation": false, "requiresAuth": false },
             { "id": "print suggest", "mutation": true, "requiresAuth": "OPENROUTER_API_KEY or GEMINI_API_KEY" },
             { "id": "print render", "mutation": true, "requiresAuth": false },
+            { "id": "ads formats", "mutation": false, "requiresAuth": false },
+            { "id": "ads suggest", "mutation": true, "requiresAuth": "OPENROUTER_API_KEY or GEMINI_API_KEY" },
+            { "id": "ads render", "mutation": true, "requiresAuth": "optional GEMINI_API_KEY for AI backgrounds" },
+            { "id": "ads validate", "mutation": false, "requiresAuth": false },
             { "id": "run", "mutation": true, "requiresAuth": "varies by step" },
             { "id": "interactive", "mutation": true, "requiresAuth": "varies by selection", "human": true },
             { "id": "config schema", "mutation": false },
             { "id": "env schema", "mutation": false },
         ],
-        "phases": ["brand", "copy", "mobile_background", "print_copy", "validate"],
+        "phases": ["brand", "copy", "mobile_background", "print_copy", "ads", "validate"],
         "platforms": {
             "mobile": ["apple_iphone"],
             "print": print::format_id_slice(),
+            "ads": ads::format_id_slice(),
         },
         "promptPrecedence": [
             "CLI --prompt-append / --prompt-file",
@@ -59,8 +65,9 @@ pub fn config_schema_json() -> serde_json::Value {
                 },
                 "prompts": { "{phase}": { "model": "optional", "prompt_append": "multiline", "prompt_files": ["paths"] } }
             },
-            "pipeline.steps": [{ "id": "string", "phase": "brand|copy|mobile|print", "enabled": "bool", "depends_on": ["ids"] }],
-            "slides.items": [{ "id": "string", "raw": "filename in storeshots/raw/", "title": "string", "subtitle": "string", "label": "string", "prompt_append": "optional" }]
+            "pipeline.steps": [{ "id": "string", "phase": "brand|copy|mobile|print|ads", "enabled": "bool", "depends_on": ["ids"] }],
+            "slides.items": [{ "id": "string", "raw": "filename in storeshots/raw/", "title": "string", "subtitle": "string", "label": "string", "prompt_append": "optional" }],
+            "ads.items": [{ "id": "string", "raw": "filename", "headline": "string", "subtitle": "string", "cta": "string", "layout": "auto|device-bottom|device-center|device-right|device-left|screenshot-hero|text-banner", "format_groups": ["google-pmax|google-display|social|play-feature|all"] }]
         }
     })
 }

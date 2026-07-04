@@ -64,7 +64,7 @@ pub async fn render_slide(ctx: RenderContext<'_>) -> Result<RgbaImage> {
     let draw_x = screen.x.saturating_sub(bleed);
     let draw_y = screen.y.saturating_sub(bleed);
 
-    let fitted = resize_cover_top(&screenshot, draw_w, draw_h);
+    let fitted = resize_contain(&screenshot, draw_w, draw_h);
     let clipped = clip_rounded_rect(&fitted, SC_RX, SC_RY);
     overlay_image_alpha(&mut canvas, &clipped, draw_x, draw_y);
 
@@ -323,6 +323,26 @@ fn overlay_mockup_frame(
 
 fn is_screen_fill(p: Rgba<u8>) -> bool {
     p[3] > 160 && p[0] < 48 && p[1] < 48 && p[2] < 48
+}
+
+/// Scale to fit inside the target rect without cropping. Side or top/bottom
+/// letterboxing stays under the device bezel when aspect ratios differ slightly.
+fn resize_contain(img: &RgbaImage, tw: u32, th: u32) -> RgbaImage {
+    let sw = img.width().max(1) as f32;
+    let sh = img.height().max(1) as f32;
+    let scale = (tw as f32 / sw).min(th as f32 / sh);
+    let nw = (sw * scale).round().max(1.0) as u32;
+    let nh = (sh * scale).round().max(1.0) as u32;
+    let resized = imageops::resize(img, nw, nh, imageops::FilterType::Lanczos3);
+    let mut out = RgbaImage::from_pixel(tw, th, Rgba([0, 0, 0, 255]));
+    let x0 = (tw - nw) / 2;
+    let y0 = (th - nh) / 2;
+    for y in 0..nh {
+        for x in 0..nw {
+            out.put_pixel(x0 + x, y0 + y, *resized.get_pixel(x, y));
+        }
+    }
+    out
 }
 
 /// Scale and crop to exactly fill the target rect (no letterboxing).

@@ -72,3 +72,43 @@ pub fn screen_rect_in_mockup(mx: u32, my: u32, mw: u32, mh: u32) -> Rect {
         h: (mh as f32 * SC_HEIGHT).round() as u32,
     }
 }
+
+/// Phone placement for paid ads — fits fully inside a vertical zone (no bottom bleed).
+pub fn ad_phone_placement(
+    canvas_w: u32,
+    canvas_h: u32,
+    zone_top: f32,
+    zone_bottom: f32,
+    max_width_frac: f32,
+) -> PhonePlacement {
+    let bottom = zone_bottom.min(canvas_h as f32);
+    let available_h = (bottom - zone_top).max(8.0);
+    let max_w = canvas_w as f32 * max_width_frac;
+
+    let mut mock_w = max_w;
+    let mut mock_h = mock_w * (MK_H / MK_W);
+    if mock_h > available_h {
+        mock_h = available_h;
+        mock_w = mock_h * (MK_W / MK_H);
+    }
+
+    let mock_w = mock_w.max(24.0).round() as u32;
+    let mock_h = mock_h.max(48.0).round() as u32;
+    let x = canvas_w.saturating_sub(mock_w) / 2;
+    let y = (zone_top + available_h - mock_h as f32 - available_h * 0.02)
+        .max(zone_top)
+        .round() as u32;
+    let max_y = canvas_h.saturating_sub(mock_h).saturating_sub((canvas_h as f32 * 0.02).round() as u32);
+    let y = y.min(max_y);
+
+    let screen = screen_rect_in_mockup(x, y, mock_w, mock_h);
+    PhonePlacement {
+        mockup: Rect {
+            x,
+            y,
+            w: mock_w,
+            h: mock_h,
+        },
+        screen,
+    }
+}

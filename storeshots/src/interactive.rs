@@ -1,6 +1,7 @@
 use crate::{
-    cmd_brand_extract, cmd_brand_validate, cmd_capabilities, cmd_config_keys, cmd_copy_suggest,
-    cmd_init, cmd_print_render, cmd_render, cmd_run, cmd_validate,
+    cmd_ads_formats, cmd_ads_render, cmd_ads_suggest, cmd_ads_validate, cmd_brand_extract,
+    cmd_brand_validate, cmd_capabilities, cmd_config_keys, cmd_copy_suggest, cmd_init,
+    cmd_print_render, cmd_render, cmd_run, cmd_validate,
 };
 use crate::print::PRINT_FORMATS;
 use anyhow::{Context, Result};
@@ -62,6 +63,7 @@ pub async fn run(initial_app: Option<PathBuf>) -> Result<()> {
             "Brand board",
             "Copy suggestions",
             "Mobile screenshots",
+            "Marketing ads",
             "Print materials",
             "Run pipeline",
             "Validate & tools",
@@ -88,10 +90,11 @@ pub async fn run(initial_app: Option<PathBuf>) -> Result<()> {
             1 => menu_brand(&session).await,
             2 => menu_copy(&session).await,
             3 => menu_mobile(&session).await,
-            4 => menu_print(&session).await,
-            5 => menu_pipeline(&session).await,
-            6 => menu_tools(&session).await,
-            7 => menu_change_project(&mut session),
+            4 => menu_ads(&session).await,
+            5 => menu_print(&session).await,
+            6 => menu_pipeline(&session).await,
+            7 => menu_tools(&session).await,
+            8 => menu_change_project(&mut session),
             _ => Ok(()),
         };
 
@@ -310,6 +313,68 @@ async fn menu_mobile(session: &Session) -> Result<()> {
     }
 }
 
+async fn menu_ads(session: &Session) -> Result<()> {
+    let items = [
+        "List ad formats & sizes",
+        "Suggest ad layouts (LLM)",
+        "Render ads",
+        "Validate output",
+        "Back",
+    ];
+    let choice = Select::new()
+        .with_prompt("Marketing ads")
+        .items(&items)
+        .interact()?;
+
+    let app = session.app.clone();
+    match choice {
+        0 => {
+            run_labeled("Ads formats", async {
+                cmd_ads_formats(false)?;
+                Ok(())
+            })
+            .await
+        }
+        1 => {
+            let dry_run = Confirm::new()
+                .with_prompt("Dry run (preview only)?")
+                .default(false)
+                .interact()?;
+            let yes = dry_run
+                || Confirm::new()
+                    .with_prompt("Proceed with ads suggest?")
+                    .default(true)
+                    .interact()?;
+            run_labeled("Ads suggest", async {
+                cmd_ads_suggest(app, dry_run, yes, vec![], vec![], false).await
+            })
+            .await
+        }
+        2 => {
+            let no_ai = Confirm::new()
+                .with_prompt("Skip AI backgrounds?")
+                .default(false)
+                .interact()?;
+            let yes = Confirm::new()
+                .with_prompt("Proceed with ads render?")
+                .default(true)
+                .interact()?;
+            run_labeled("Ads render", async {
+                cmd_ads_render(app, no_ai, vec![], vec![], "en".into(), yes, false).await
+            })
+            .await
+        }
+        3 => {
+            run_labeled("Ads validate", async {
+                cmd_ads_validate(app, false)?;
+                Ok(())
+            })
+            .await
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn menu_print(session: &Session) -> Result<()> {
     let format_labels: Vec<String> = PRINT_FORMATS
         .iter()
@@ -406,6 +471,7 @@ async fn menu_pipeline(session: &Session) -> Result<()> {
 async fn menu_tools(session: &Session) -> Result<()> {
     let items = [
         "Validate mobile output",
+        "Validate ads output",
         "Validate brand board",
         "Show capabilities",
         "Show API key resolution",
@@ -426,19 +492,26 @@ async fn menu_tools(session: &Session) -> Result<()> {
             .await
         }
         1 => {
+            run_labeled("Ads validate", async {
+                cmd_ads_validate(app, false)?;
+                Ok(())
+            })
+            .await
+        }
+        2 => {
             run_labeled("Brand validate", async {
                 cmd_brand_validate(app, false)?;
                 Ok(())
             })
             .await
         }
-        2 => {
+        3 => {
             progress_start("Capabilities");
             cmd_capabilities(false)?;
             progress_ok("Capabilities printed");
             Ok(())
         }
-        3 => {
+        4 => {
             progress_start("Config keys");
             cmd_config_keys(false)?;
             progress_ok("Key resolution printed");

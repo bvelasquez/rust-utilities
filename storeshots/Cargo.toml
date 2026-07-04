@@ -1,6 +1,6 @@
 [package]
 name = "storeshots"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Generate App Store marketing screenshots from raw captures with AI backgrounds"
 include = ["src/**/*", "assets/**/*", "Cargo.toml"]

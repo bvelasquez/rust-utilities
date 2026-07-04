@@ -64,7 +64,7 @@ fn render_copy_column(
     cy += logo_size + pad * 0.5;
 
     c.draw_eyebrow(
-        "What we deliver",
+        "What you get",
         x as f32 + pad,
         cy,
         w as f32 * 0.026,
@@ -136,7 +136,7 @@ fn render_hero_column(
     cy += h as f32 * 0.04;
 
     c.draw_body_width(
-        "Full-stack studio for production AI, web, mobile, and cloud — from design through deploy.",
+        &ctx.copy.hero_subline(),
         x as f32 + pad,
         cy,
         w as f32 * 0.03,
@@ -146,7 +146,7 @@ fn render_hero_column(
     cy += h as f32 * 0.12;
 
     c.draw_headline_width(
-        "Let's build",
+        ctx.copy.hero_cta(),
         x as f32 + pad,
         cy,
         w as f32 * 0.04,

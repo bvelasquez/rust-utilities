@@ -10,6 +10,7 @@ pub enum PromptPhase {
     #[allow(dead_code)]
     MobileBackground,
     PrintCopy,
+    Ads,
     #[allow(dead_code)]
     Validate,
 }
@@ -21,6 +22,7 @@ impl PromptPhase {
             Self::Copy => "copy",
             Self::MobileBackground => "mobile_background",
             Self::PrintCopy => "print_copy",
+            Self::Ads => "ads",
             Self::Validate => "validate",
         }
     }
@@ -31,6 +33,7 @@ impl PromptPhase {
             Self::Copy => "copy.append.md",
             Self::MobileBackground => "mobile-background.append.md",
             Self::PrintCopy => "print.append.md",
+            Self::Ads => "ads.append.md",
             Self::Validate => "validate.append.md",
         }
     }
