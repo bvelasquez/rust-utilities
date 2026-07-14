@@ -7,7 +7,7 @@ readme = "README.md"
 license = "MIT"
 repository = "https://github.com/bvelasquez/rust-utilities"
 homepage = "https://github.com/bvelasquez/rust-utilities/tree/main/model-use"
-keywords = ["cli", "llm", "openai", "anthropic", "cursor", "openrouter"]
+keywords = ["cli", "llm", "openai", "anthropic", "cursor"]
 categories = ["command-line-utilities"]
 include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE"]
 
