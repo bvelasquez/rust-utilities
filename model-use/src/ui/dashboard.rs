@@ -186,7 +186,7 @@ fn draw_ui(
         .style(Style::default().fg(theme::MUTED))
         .highlight_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )
         .divider("│")

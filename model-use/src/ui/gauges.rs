@@ -16,7 +16,7 @@ pub fn budget_gauge_over(status: &BudgetStatus) -> Gauge<'static> {
     Gauge::default()
         .gauge_style(
             Style::default()
-                .fg(theme::gauge_color(ratio))
+                .fg(theme::budget_gauge_fill_color(&status.label, ratio))
                 .bg(Color::DarkGray)
                 .add_modifier(if status.over_budget {
                     Modifier::BOLD
