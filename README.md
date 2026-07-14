@@ -12,6 +12,7 @@ Each tool lives in its own crate, builds independently, and is designed for both
 | [**secret-sweep**](./secret-sweep/) | Find local-only secrets and dotfiles across your projects, warn about credentials committed to git, and back everything up into an encrypted `.svault` archive. |
 | [**storeshots**](./storeshots/) | Turn raw iOS simulator captures into polished App Store screenshots with headlines, AI backgrounds, and a photoreal iPhone frame. |
 | [**gads**](./gads/) | Agent-first Google Ads CLI — GAQL reads, campaign mutates, shortcuts, and interactive TUI over the REST API. |
+| [**model-use**](./model-use/) | Agent-first LLM cost aggregator — OpenRouter, Anthropic, OpenAI, and Cursor spend with budgets and a ratatui dashboard. |
 
 ## Requirements
 
@@ -29,6 +30,7 @@ cd git-sweep && cargo build --release
 cd secret-sweep && cargo build --release
 cd storeshots && cargo build --release
 cd gads && cargo build --release
+cd model-use && cargo build --release
 ```
 
 Binaries land in each crate’s `target/release/` directory. Add them to your `PATH`, or install with:
@@ -38,6 +40,9 @@ cargo install --path git-sweep
 cargo install --path secret-sweep
 cargo install --path storeshots
 cargo install --path gads
+cargo install --path model-use
+# or from crates.io:
+cargo install model-use
 ```
 
 ## Quick start
@@ -83,6 +88,7 @@ Full docs: [gads/README.md](./gads/README.md). Agent skill: [gads/skills/gads-cl
 | secret-sweep | `~/.config/secret-sweep/config.toml` |
 | storeshots | `<app-root>/storeshots.toml` |
 | gads | `~/.config/gads/credentials.json` + optional `gads.toml` |
+| model-use | `~/.config/model-use/config.toml` |
 
 All tools also accept CLI flags and environment variables — see each tool’s README for details.
 

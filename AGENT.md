@@ -62,5 +62,6 @@ Match existing CLIs (`gads`, `elabs`):
 | `storeshots/` | `storeshots` | Marketing assets |
 | `git-sweep/` | `git-sweep` | Git cleanup |
 | `secret-sweep/` | `secret-sweep` | Secret scanning |
+| `model-use/` | `model-use` | LLM cost aggregator |
 
 When adding a new CLI, follow `elevenlabs/` or `gads/` layout and add a row here.
