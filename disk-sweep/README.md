@@ -55,8 +55,9 @@ disk-sweep review ~/Library/Developer --json
 | `Tab` / `Shift+Tab` | Move between category, item, and detail panels |
 | `↑`/`↓` or `j`/`k` | Navigate lists |
 | `Space` | Toggle selection (items) or all in category |
-| `a` | Select all existing items |
+| `*` / `A` | Select all existing items |
 | `n` | Clear selection |
+| `a` | Analyze — pick projects root, scan stale projects |
 | `r` | Rescan sizes |
 | `c` | Clean selected (with confirmation) |
 | `q` | Quit |
@@ -76,7 +77,7 @@ disk-sweep watch --path ~/projects
 | Key | Action |
 |-----|--------|
 | `r` | Deep scan (folders + cleanup targets) |
-| `a` | Full analyze (dot folders, Library, stale projects) |
+| `a` | Analyze — pick projects root, then scan dot folders, Library, stale projects |
 | `v` | Refresh volume gauge only (fast) |
 | `Space` | Toggle cleanup item selection |
 | `*` / `A` | Select all |

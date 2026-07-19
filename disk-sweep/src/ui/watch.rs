@@ -13,13 +13,14 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Bar, BarChart, BarGroup, Block, Gauge, List, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::analyze::AnalyzeOptions;
-use crate::clean::{clean_items_with_progress, CleanReport, CleanUpdate};
+use super::active_clean::{ActiveClean, CleanPoll};
+use super::progress::CleanProgressView;
 use crate::scan::format_bytes;
 use crate::volume;
 use crate::watch_data::{
@@ -27,13 +28,16 @@ use crate::watch_data::{
     WatchSnapshot,
 };
 
+use super::active_analyze::{ActiveAnalyze, AnalyzePoll};
 use super::charts::{bar_color, usage_color, Sparkline};
 use super::cleanup_list::{
     build_grouped_cleanup_list, first_selectable_row, item_index_at_row, move_selectable_row,
 };
+use super::progress::{centered_rect, draw_clean_overlay, draw_progress_overlay, ProgressView};
+use super::project_picker::{draw_project_picker, ProjectRootPicker};
 use super::theme::{
     draw_modal_backdrop, draw_modal_panel, fill_rects, footer_block, highlight_style,
-    modal_surface_style, muted_style, panel_block, selected_style, title_style, MODAL_SURFACE,
+    modal_surface_style, muted_style, panel_block, selected_style, title_style,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,108 +48,8 @@ enum Focus {
 
 enum WatchMode {
     Normal,
+    PickProjectRoot,
     ConfirmClean,
-    Cleaning,
-}
-
-struct CleanProgressView {
-    current: usize,
-    total: usize,
-    path: String,
-    log: Vec<String>,
-}
-
-struct ActiveClean {
-    rx: Receiver<CleanUpdate>,
-    handle: std::thread::JoinHandle<Result<CleanReport>>,
-}
-
-impl ActiveClean {
-    fn start(items: Vec<crate::scan::ScanItem>) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<CleanUpdate>(64);
-        let handle = std::thread::spawn(move || clean_items_with_progress(&items, false, &tx));
-        Self { rx, handle }
-    }
-
-    fn poll(&mut self, progress: &mut CleanProgressView) -> CleanPoll {
-        while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                CleanUpdate::Progress {
-                    current,
-                    total,
-                    path,
-                } => {
-                    progress.current = current;
-                    progress.total = total;
-                    progress.path = path;
-                }
-                CleanUpdate::Log(line) => {
-                    progress.log.push(line);
-                    if progress.log.len() > 6 {
-                        progress.log.remove(0);
-                    }
-                }
-            }
-        }
-        if self.handle.is_finished() {
-            CleanPoll::Done
-        } else {
-            CleanPoll::Running
-        }
-    }
-
-    fn finish(self) -> Result<CleanReport> {
-        self.handle.join().map_err(|_| anyhow::anyhow!("clean thread panicked"))?
-    }
-}
-
-enum CleanPoll {
-    Running,
-    Done,
-}
-
-struct ProgressView {
-    phase: String,
-    detail: String,
-    current: usize,
-    total: usize,
-    log: Vec<String>,
-}
-
-impl ProgressView {
-    fn apply(&mut self, update: &ScanUpdate) {
-        match update {
-            ScanUpdate::Phase {
-                phase,
-                detail,
-                current,
-                total,
-            } => {
-                self.phase = (*phase).to_string();
-                self.detail = detail.clone();
-                self.current = *current;
-                self.total = *total;
-            }
-            ScanUpdate::Log(line) => {
-                self.log.push(line.clone());
-                if self.log.len() > 8 {
-                    self.log.remove(0);
-                }
-            }
-            ScanUpdate::Failed(msg) => {
-                self.phase = "Error".into();
-                self.detail = msg.clone();
-            }
-            ScanUpdate::Snapshot(_) | ScanUpdate::Cancelled | ScanUpdate::AnalyzeComplete(_) => {}
-        }
-    }
-
-    fn ratio(&self) -> f64 {
-        if self.total == 0 {
-            return 0.0;
-        }
-        (self.current as f64 / self.total as f64).clamp(0.0, 1.0)
-    }
 }
 
 struct ActiveScan {
@@ -159,32 +63,9 @@ enum ScanPoll {
     Running,
     Done,
     Cancelled,
-    AnalyzeComplete(Vec<crate::scan::ScanItem>),
 }
 
 impl ActiveScan {
-    fn start_analyze(options: AnalyzeOptions) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<ScanUpdate>(64);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_worker = Arc::clone(&cancel);
-        std::thread::spawn(move || {
-            match crate::analyze::run_analyze_with_progress(&options, &cancel_worker, &tx) {
-                Ok(report) => {
-                    let _ = tx.send(ScanUpdate::AnalyzeComplete(report.items));
-                }
-                Err(e) => {
-                    let _ = tx.send(ScanUpdate::Failed(format!("{e:#}")));
-                }
-            }
-        });
-        Self {
-            rx,
-            cancel,
-            finished: false,
-            saw_done: false,
-        }
-    }
-
     fn start(watch_paths: &[(String, PathBuf)], top_n: usize, kind: ScanKind) -> Self {
         let (tx, rx) = mpsc::sync_channel::<ScanUpdate>(64);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -221,10 +102,6 @@ impl ActiveScan {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 ScanUpdate::Snapshot(s) => *snapshot = s,
-                ScanUpdate::AnalyzeComplete(items) => {
-                    self.finished = true;
-                    return ScanPoll::AnalyzeComplete(items);
-                }
                 ScanUpdate::Cancelled => got_cancelled = true,
                 ScanUpdate::Failed(e) => {
                     if let Some(p) = progress.as_mut() {
@@ -243,13 +120,11 @@ impl ActiveScan {
                         self.saw_done = true;
                     }
                     if progress.is_none() {
-                        *progress = Some(ProgressView {
-                            phase: (*phase).to_string(),
-                            detail: detail.clone(),
-                            current,
-                            total,
-                            log: vec![],
-                        });
+                        *progress = Some(ProgressView::new(&detail, total));
+                        if let Some(p) = progress.as_mut() {
+                            p.phase = (*phase).to_string();
+                            p.current = current;
+                        }
                     } else if let Some(p) = progress.as_mut() {
                         p.apply(&ScanUpdate::Phase {
                             phase,
@@ -261,18 +136,13 @@ impl ActiveScan {
                 }
                 ScanUpdate::Log(line) => {
                     if progress.is_none() {
-                        *progress = Some(ProgressView {
-                            phase: "Scanning".into(),
-                            detail: String::new(),
-                            current: 0,
-                            total: 1,
-                            log: vec![],
-                        });
+                        *progress = Some(ProgressView::new("Scanning", 1));
                     }
                     if let Some(p) = progress.as_mut() {
                         p.apply(&ScanUpdate::Log(line));
                     }
                 }
+                ScanUpdate::AnalyzeComplete(_) => {}
             }
         }
 
@@ -309,15 +179,29 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
     item_state.select(Some(0));
     let mut focus = Focus::CleanupList;
     let mut mode = WatchMode::Normal;
+    let preferred_root = watch_paths
+        .iter()
+        .find(|(label, _)| label == "Projects")
+        .map(|(_, p)| p.as_path());
+    let mut project_picker = ProjectRootPicker::new(preferred_root);
     let mut active_scan: Option<ActiveScan> = None;
-    let mut analyzing = false;
+    let mut active_analyze: Option<ActiveAnalyze> = None;
     let mut active_clean: Option<ActiveClean> = None;
     let mut progress: Option<ProgressView> = None;
     let mut clean_progress: Option<CleanProgressView> = None;
     let mut last_volume_refresh = Instant::now();
     let mut last_deep_scan = Instant::now();
-    let mut status = "Press r for deep scan · a for analyze · v refresh volume".to_string();
+    let mut status = "Starting deep scan…".to_string();
     let mut history: Vec<f64> = vec![snapshot.volume.used_ratio];
+
+    start_scan(
+        &mut active_scan,
+        &mut progress,
+        &watch_paths,
+        top_n,
+        ScanKind::Full,
+        &mut status,
+    );
 
     let restore = || -> Result<()> {
         disable_raw_mode()?;
@@ -333,31 +217,15 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                     last_deep_scan = Instant::now();
                     history.push(snapshot.volume.used_ratio);
                     trim_history(&mut history);
-                    status = if analyzing {
-                        "analyze complete".into()
-                    } else if snapshot.deep_scan_done {
+                    status = if snapshot.deep_scan_done {
                         "deep scan complete".into()
                     } else {
                         "volume updated".into()
                     };
-                    analyzing = false;
-                    active_scan = None;
-                    progress = None;
-                }
-                ScanPoll::AnalyzeComplete(items) => {
-                    apply_analyze_results(&mut snapshot, items, top_n);
-                    history.push(snapshot.volume.used_ratio);
-                    trim_history(&mut history);
-                    status = format!(
-                        "analyze complete — {} candidates (none selected)",
-                        snapshot.cleanup_items.len()
-                    );
-                    analyzing = false;
                     active_scan = None;
                     progress = None;
                 }
                 ScanPoll::Cancelled => {
-                    analyzing = false;
                     active_scan = None;
                     progress = None;
                     status = "scan cancelled".into();
@@ -366,7 +234,34 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
             }
         }
 
-        let scanning = active_scan.is_some();
+        if let Some(analyze) = active_analyze.as_mut() {
+            match analyze.poll(&mut progress) {
+                AnalyzePoll::Complete(items) => {
+                    apply_analyze_results(&mut snapshot, items, top_n);
+                    history.push(snapshot.volume.used_ratio);
+                    trim_history(&mut history);
+                    status = format!(
+                        "analyze complete — {} candidates (none selected)",
+                        snapshot.cleanup_items.len()
+                    );
+                    active_analyze = None;
+                    progress = None;
+                }
+                AnalyzePoll::Done => {
+                    active_analyze = None;
+                    progress = None;
+                    status = "analyze finished with errors".into();
+                }
+                AnalyzePoll::Cancelled => {
+                    active_analyze = None;
+                    progress = None;
+                    status = "analyze cancelled".into();
+                }
+                AnalyzePoll::Running => {}
+            }
+        }
+
+        let scanning = active_scan.is_some() || active_analyze.is_some();
         let cleaning = active_clean.is_some();
         terminal.draw(|f| {
             draw_watch(
@@ -384,6 +279,11 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                 clean_progress.as_ref(),
                 scanning,
                 cleaning,
+                if matches!(mode, WatchMode::PickProjectRoot) {
+                    Some(&mut project_picker)
+                } else {
+                    None
+                },
             );
         })?;
 
@@ -418,12 +318,10 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                     }
                 }
             }
-            if cleaning {
+            if active_clean.is_some() {
                 if event::poll(Duration::from_millis(80))? {
-                    if let Event::Key(key) = event::read()? {
-                        if key.kind == KeyEventKind::Press {
-                            // ignore keys while cleaning except quit is blocked
-                        }
+                    while event::poll(Duration::from_millis(0))? {
+                        let _ = event::read()?;
                     }
                 }
                 continue;
@@ -446,7 +344,7 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                                     mode = WatchMode::Normal;
                                     status = "nothing to clean".into();
                                 } else {
-                                    mode = WatchMode::Cleaning;
+                                    mode = WatchMode::Normal;
                                     status = "cleaning…".into();
                                     clean_progress = Some(CleanProgressView {
                                         current: 0,
@@ -460,6 +358,36 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                             KeyCode::Char('n') | KeyCode::Esc => {
                                 mode = WatchMode::Normal;
                                 status = "clean cancelled".into();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if matches!(mode, WatchMode::PickProjectRoot) {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                mode = WatchMode::Normal;
+                                status = "analyze cancelled".into();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => project_picker.move_selection(-1),
+                            KeyCode::Down | KeyCode::Char('j') => project_picker.move_selection(1),
+                            KeyCode::Enter => {
+                                if let Some(root) = project_picker.selected().cloned() {
+                                    start_analyze_with_root(
+                                        &mut active_analyze,
+                                        &mut progress,
+                                        &mut status,
+                                        root,
+                                    );
+                                    mode = WatchMode::Normal;
+                                }
                             }
                             _ => {}
                         }
@@ -490,6 +418,9 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                         if let Some(scan) = active_scan.take() {
                             scan.abort();
                         }
+                        if let Some(analyze) = active_analyze.take() {
+                            analyze.abort();
+                        }
                         restore()?;
                         terminal.show_cursor()?;
                         return Ok(());
@@ -498,11 +429,14 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                         if let Some(scan) = active_scan.take() {
                             scan.abort();
                         }
+                        if let Some(analyze) = active_analyze.take() {
+                            analyze.abort();
+                        }
                         restore()?;
                         terminal.show_cursor()?;
                         return Ok(());
                     }
-                    KeyCode::Char('r') if active_scan.is_none() => start_scan(
+                    KeyCode::Char('r') if active_scan.is_none() && active_analyze.is_none() => start_scan(
                         &mut active_scan,
                         &mut progress,
                         &watch_paths,
@@ -510,7 +444,7 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                         ScanKind::Full,
                         &mut status,
                     ),
-                    KeyCode::Char('v') if active_scan.is_none() => {
+                    KeyCode::Char('v') if active_scan.is_none() && active_analyze.is_none() => {
                         if let Err(e) = refresh_volume(&mut snapshot, anchor) {
                             status = format!("volume refresh failed: {e:#}");
                         } else {
@@ -539,7 +473,7 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                         let next = move_selectable_row(&grouped.row_to_item, row, 1);
                         item_state.select(Some(next));
                     }
-                    KeyCode::Char(' ') if focus == Focus::CleanupList && active_scan.is_none() => {
+                    KeyCode::Char(' ') if focus == Focus::CleanupList && active_scan.is_none() && active_analyze.is_none() => {
                         if let Some(row) = item_state.selected() {
                             let grouped = build_grouped_cleanup_list(&snapshot.cleanup_items);
                             if let Some(idx) = item_index_at_row(&grouped.row_to_item, row) {
@@ -550,13 +484,12 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                             }
                         }
                     }
-                    KeyCode::Char('a') if active_scan.is_none() => start_analyze(
-                        &mut active_scan,
-                        &mut progress,
-                        &mut status,
-                        &mut analyzing,
-                    ),
-                    KeyCode::Char('*') | KeyCode::Char('A') if active_scan.is_none() => {
+                    KeyCode::Char('a') if active_scan.is_none() && active_analyze.is_none() => {
+                        project_picker = ProjectRootPicker::new(preferred_root);
+                        mode = WatchMode::PickProjectRoot;
+                        status = "select projects root for analyze".into();
+                    }
+                    KeyCode::Char('*') | KeyCode::Char('A') if active_scan.is_none() && active_analyze.is_none() => {
                         for item in &mut snapshot.cleanup_items {
                             if item.exists {
                                 item.selected = true;
@@ -565,7 +498,7 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                         snapshot.recalc_selection();
                         status = format!("{} items selected", snapshot.selected_count);
                     }
-                    KeyCode::Char('n') if active_scan.is_none() => {
+                    KeyCode::Char('n') if active_scan.is_none() && active_analyze.is_none() => {
                         for item in &mut snapshot.cleanup_items {
                             item.selected = false;
                         }
@@ -575,7 +508,7 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                     KeyCode::Char('?') => {
                         status = "see: disk-sweep targets explain".into();
                     }
-                    KeyCode::Char('c') if active_scan.is_none() && active_clean.is_none() => {
+                    KeyCode::Char('c') if active_scan.is_none() && active_analyze.is_none() && active_clean.is_none() => {
                         if snapshot.selected_count == 0 {
                             status = "nothing selected — run r to scan first".into();
                         } else {
@@ -586,6 +519,7 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                 }
             }
         } else if active_scan.is_none()
+            && active_analyze.is_none()
             && volume_interval > Duration::ZERO
             && last_volume_refresh.elapsed() >= volume_interval
         {
@@ -598,22 +532,24 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
     }
 }
 
-fn start_analyze(
-    active_scan: &mut Option<ActiveScan>,
+fn start_analyze_with_root(
+    active_analyze: &mut Option<ActiveAnalyze>,
     progress: &mut Option<ProgressView>,
     status: &mut String,
-    analyzing: &mut bool,
+    projects_root: PathBuf,
 ) {
-    *status = "analyzing dot folders, Library, stale projects…".into();
-    *analyzing = true;
-    *progress = Some(ProgressView {
-        phase: "Starting".into(),
-        detail: "Analyze: dot folders, Library, stale projects…".into(),
-        current: 0,
-        total: 3,
-        log: vec![],
-    });
-    *active_scan = Some(ActiveScan::start_analyze(AnalyzeOptions::default()));
+    *status = format!(
+        "analyzing {} — dot folders, Library, stale projects…",
+        short_path(&projects_root)
+    );
+    *progress = Some(ProgressView::new(
+        "Analyze: dot folders, Library, stale projects…",
+        3,
+    ));
+    *active_analyze = Some(ActiveAnalyze::start(AnalyzeOptions {
+        projects_root,
+        ..AnalyzeOptions::default()
+    }));
 }
 
 fn start_scan(
@@ -628,16 +564,13 @@ fn start_scan(
         ScanKind::Full => "deep scanning…".into(),
         ScanKind::Volume => "refreshing volume…".into(),
     };
-    *progress = Some(ProgressView {
-        phase: "Starting".into(),
-        detail: match kind {
-            ScanKind::Full => "Deep scan: folders + cleanup targets…".into(),
-            ScanKind::Volume => "Reading volume stats…".into(),
+    *progress = Some(ProgressView::new(
+        match kind {
+            ScanKind::Full => "Deep scan: folders + cleanup targets…",
+            ScanKind::Volume => "Reading volume stats…",
         },
-        current: 0,
-        total: 1,
-        log: vec![],
-    });
+        1,
+    ));
     *active_scan = Some(ActiveScan::start(watch_paths, top_n, kind));
 }
 
@@ -662,6 +595,7 @@ fn draw_watch(
     clean_progress: Option<&CleanProgressView>,
     scanning: bool,
     cleaning: bool,
+    project_picker: Option<&mut ProjectRootPicker>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -693,12 +627,19 @@ fn draw_watch(
     draw_sparkline(f, chunks[2], history, snap.volume.used_ratio);
     draw_footer(f, chunks[3], volume_interval, since_deep_scan, snap, status, scanning, cleaning);
 
-    if progress.is_some() || matches!(mode, WatchMode::ConfirmClean) || cleaning {
+    if progress.is_some() || matches!(mode, WatchMode::ConfirmClean | WatchMode::PickProjectRoot) || cleaning {
         draw_modal_backdrop(f, area);
     }
 
     if let Some(p) = progress {
-        draw_scan_overlay(f, area, p);
+        let title = if p.phase == "Analyze" { "Analyzing" } else { "Scanning" };
+        draw_progress_overlay(f, area, title, p, "q quit (cancels scan)");
+    }
+
+    if matches!(mode, WatchMode::PickProjectRoot) {
+        if let Some(picker) = project_picker {
+            draw_project_picker(f, area, picker);
+        }
     }
 
     if matches!(mode, WatchMode::ConfirmClean) {
@@ -789,131 +730,6 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, snap: &WatchSnapshot) {
     f.render_widget(
         Paragraph::new(lines).style(text_style).wrap(Wrap { trim: true }),
         inner,
-    );
-}
-
-fn draw_scan_overlay(f: &mut ratatui::Frame, area: Rect, progress: &ProgressView) {
-    let popup = centered_rect(72, 44, area);
-    let inner_area = draw_modal_panel(f, popup, "Scanning", Color::Cyan);
-    let text_style = modal_surface_style();
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(inner_area);
-    fill_rects(f, &chunks, modal_surface_style());
-
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Phase: ", muted_style()),
-            Span::styled(&progress.phase, Style::default().add_modifier(Modifier::BOLD)),
-        ]))
-        .style(text_style),
-        chunks[0],
-    );
-    f.render_widget(
-        Paragraph::new(progress.detail.as_str())
-            .style(text_style)
-            .wrap(Wrap { trim: true }),
-        chunks[1],
-    );
-    f.render_widget(
-        Paragraph::new(format!("Step {} of {}", progress.current, progress.total)).style(text_style),
-        chunks[2],
-    );
-    f.render_widget(
-        Gauge::default()
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
-            .ratio(progress.ratio())
-            .label(format!("{:.0}%", progress.ratio() * 100.0)),
-        chunks[3],
-    );
-
-    let log_lines: Vec<Line> = progress
-        .log
-        .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), muted_style())))
-        .collect();
-    f.render_widget(
-        List::new(log_lines).block(
-            Block::default()
-                .title("Completed")
-                .borders(ratatui::widgets::Borders::ALL)
-                .style(modal_surface_style()),
-        ),
-        chunks[4],
-    );
-    f.render_widget(
-        Paragraph::new("q quit (cancels scan)")
-            .style(muted_style().bg(MODAL_SURFACE)),
-        chunks[5],
-    );
-}
-
-fn draw_clean_overlay(f: &mut ratatui::Frame, area: Rect, progress: &CleanProgressView) {
-    let popup = centered_rect(70, 40, area);
-    let inner_area = draw_modal_panel(f, popup, "Cleaning", Color::Yellow);
-    let text_style = modal_surface_style();
-
-    let ratio = if progress.total > 0 {
-        progress.current as f64 / progress.total as f64
-    } else {
-        0.0
-    };
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Min(3),
-        ])
-        .split(inner_area);
-    fill_rects(f, &chunks, modal_surface_style());
-
-    f.render_widget(
-        Paragraph::new(format!(
-            "Deleting item {} of {}",
-            progress.current, progress.total
-        ))
-        .style(text_style),
-        chunks[0],
-    );
-    f.render_widget(
-        Paragraph::new(progress.path.as_str())
-            .style(text_style)
-            .wrap(Wrap { trim: true }),
-        chunks[1],
-    );
-    f.render_widget(
-        Gauge::default()
-            .gauge_style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
-            .ratio(ratio.clamp(0.0, 1.0))
-            .label(format!("{:.0}%", ratio * 100.0)),
-        chunks[2],
-    );
-
-    let log_lines: Vec<Line> = progress
-        .log
-        .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), muted_style())))
-        .collect();
-    f.render_widget(
-        List::new(log_lines).block(
-            Block::default()
-                .title("Log")
-                .borders(ratatui::widgets::Borders::ALL)
-                .style(modal_surface_style()),
-        ),
-        chunks[3],
     );
 }
 
@@ -1093,25 +909,4 @@ fn short_path(path: &std::path::Path) -> String {
         }
     }
     path.display().to_string()
-}
-
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }

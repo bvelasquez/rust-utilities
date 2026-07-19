@@ -62,6 +62,35 @@ pub fn default_projects_root() -> PathBuf {
     AnalyzeOptions::default().projects_root
 }
 
+/// Common project roots for the TUI picker (existing dirs only).
+pub fn project_root_candidates() -> Vec<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let mut candidates = Vec::new();
+
+    if let Ok(env) = std::env::var("DISK_SWEEP_PROJECTS_ROOT") {
+        let p = PathBuf::from(env);
+        if p.is_dir() {
+            candidates.push(p);
+        }
+    }
+
+    for name in ["projects", "code", "src", "dev", "work", "repos", "git"] {
+        let p = home.join(name);
+        if p.is_dir() {
+            candidates.push(p);
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+
+    if candidates.is_empty() {
+        candidates.push(default_projects_root());
+    }
+
+    candidates
+}
+
 pub fn run_analyze(options: &AnalyzeOptions) -> Result<AnalyzeReport> {
     let cancel = AtomicBool::new(false);
     let (tx, _rx) = std::sync::mpsc::sync_channel(256);

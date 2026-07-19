@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -58,13 +59,55 @@ pub struct ScanReport {
     pub selected_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub enum ScanProgress {
+    Phase {
+        detail: String,
+        current: usize,
+        total: usize,
+    },
+    Log(String),
+}
+
+impl ScanReport {
+    pub fn empty() -> Self {
+        Self {
+            categories: Vec::new(),
+            total_bytes: 0,
+            selected_bytes: 0,
+            item_count: 0,
+            selected_count: 0,
+        }
+    }
+}
+
 pub fn scan_targets(targets: &[CleanupTarget]) -> Result<ScanReport> {
+    let (tx, _rx) = std::sync::mpsc::sync_channel(256);
+    scan_targets_with_progress(targets, &tx)
+}
+
+pub fn scan_targets_with_progress(
+    targets: &[CleanupTarget],
+    tx: &SyncSender<ScanProgress>,
+) -> Result<ScanReport> {
     let categories_meta = crate::targets::default_categories();
     let mut categories = Vec::new();
     let mut total_bytes = 0u64;
     let mut selected_bytes = 0u64;
     let mut item_count = 0usize;
     let mut selected_count = 0usize;
+
+    let total_steps: usize = categories_meta
+        .iter()
+        .map(|cat| {
+            targets
+                .iter()
+                .filter(|t| t.category == cat.id)
+                .count()
+        })
+        .sum();
+    let total_steps = total_steps.max(1);
+    let mut step = 0usize;
 
     for cat in categories_meta {
         let cat_targets: Vec<_> = targets
@@ -75,6 +118,13 @@ pub fn scan_targets(targets: &[CleanupTarget]) -> Result<ScanReport> {
 
         let mut items = Vec::new();
         for target in cat_targets {
+            step += 1;
+            let _ = tx.send(ScanProgress::Phase {
+                detail: format!("{} — {}", cat.name, target.name),
+                current: step,
+                total: total_steps,
+            });
+
             let expanded = expand_path(&target.path);
             if target.expand_children {
                 if expanded.is_dir() {
@@ -88,20 +138,25 @@ pub fn scan_targets(targets: &[CleanupTarget]) -> Result<ScanReport> {
                             let size = dir_size(&path)?;
                             let id = format!("{}::{}", target.id, name);
                             let selected = target.selected_by_default;
-                        items.push(ScanItem {
-                            id,
-                            target_id: target.id.clone(),
-                            parent_label: target.name.clone(),
-                            parent_path: expanded.clone(),
-                            name,
-                            path,
-                            size_bytes: size,
-                            exists: true,
-                            selected,
-                            description: target.description.clone(),
-                            kind: ItemKind::Remove,
-                            risk: String::new(),
-                        });
+                            items.push(ScanItem {
+                                id,
+                                target_id: target.id.clone(),
+                                parent_label: target.name.clone(),
+                                parent_path: expanded.clone(),
+                                name,
+                                path,
+                                size_bytes: size,
+                                exists: true,
+                                selected,
+                                description: target.description.clone(),
+                                kind: ItemKind::Remove,
+                                risk: String::new(),
+                            });
+                            let _ = tx.send(ScanProgress::Log(format!(
+                                "  {} {}",
+                                format_bytes(size),
+                                entry.file_name().to_string_lossy()
+                            )));
                         }
                     }
                 } else {
@@ -127,6 +182,13 @@ pub fn scan_targets(targets: &[CleanupTarget]) -> Result<ScanReport> {
                     kind: ItemKind::Remove,
                     risk: String::new(),
                 });
+                if expanded.exists() {
+                    let _ = tx.send(ScanProgress::Log(format!(
+                        "  {} {}",
+                        format_bytes(size),
+                        target.name
+                    )));
+                }
             }
         }
 
@@ -162,6 +224,63 @@ pub fn scan_targets(targets: &[CleanupTarget]) -> Result<ScanReport> {
         item_count,
         selected_count,
     })
+}
+
+/// Merge analyze-sourced items into a scan report, grouped by parent label.
+pub fn merge_analyze_into_report(report: &mut ScanReport, new_items: Vec<ScanItem>) {
+    use std::collections::{HashMap, HashSet};
+
+    let mut by_parent: HashMap<String, Vec<ScanItem>> = HashMap::new();
+    for item in new_items {
+        by_parent
+            .entry(item.parent_label.clone())
+            .or_default()
+            .push(item);
+    }
+
+    for (name, items) in by_parent {
+        if let Some(cat) = report.categories.iter_mut().find(|c| c.name == name) {
+            let existing: HashSet<_> = cat.items.iter().map(|i| i.path.clone()).collect();
+            for item in items {
+                if !existing.contains(&item.path) {
+                    cat.items.push(item);
+                }
+            }
+            cat.items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+            cat.total_bytes = cat.items.iter().map(|i| i.size_bytes).sum();
+            cat.selected_bytes = cat
+                .items
+                .iter()
+                .filter(|i| i.selected)
+                .map(|i| i.size_bytes)
+                .sum();
+        } else {
+            let total_bytes = items.iter().map(|i| i.size_bytes).sum();
+            report.categories.push(ScanCategory {
+                id: format!("analyze-{}", name.to_lowercase().replace(' ', "-")),
+                name: name.clone(),
+                description: format!("Analyze: {name}"),
+                items,
+                total_bytes,
+                selected_bytes: 0,
+            });
+        }
+    }
+
+    report.categories.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+    report.total_bytes = report.categories.iter().map(|c| c.total_bytes).sum();
+    report.selected_bytes = report
+        .categories
+        .iter()
+        .map(|c| c.selected_bytes)
+        .sum();
+    report.item_count = report.categories.iter().map(|c| c.items.len()).sum();
+    report.selected_count = report
+        .categories
+        .iter()
+        .flat_map(|c| c.items.iter())
+        .filter(|i| i.selected)
+        .count();
 }
 
 fn missing_item(target: &CleanupTarget, path: &Path) -> ScanItem {

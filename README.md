@@ -14,6 +14,7 @@ Each tool lives in its own crate, builds independently, and is designed for both
 | [**gads**](./gads/) | Agent-first Google Ads CLI — GAQL reads, campaign mutates, shortcuts, and interactive TUI over the REST API. |
 | [**model-use**](./model-use/) | Agent-first LLM cost aggregator — OpenRouter, Anthropic, OpenAI, and Cursor spend with budgets and a ratatui dashboard. |
 | [**disk-sweep**](./disk-sweep/) | Smart macOS disk cleanup — scan Xcode junk and caches in a ratatui TUI, clean with confirmation, and LLM-review unknown folders. |
+| [**mail-sweep**](./mail-sweep/) | Agent-first AI email triage — IMAP sync, OpenRouter classification, spam/newsletter filtering, and ratatui inbox. |
 
 ## Requirements
 
@@ -33,6 +34,7 @@ cd storeshots && cargo build --release
 cd gads && cargo build --release
 cd model-use && cargo build --release
 cd disk-sweep && cargo build --release
+cd mail-sweep && cargo build --release
 ```
 
 Binaries land in each crate’s `target/release/` directory. Add them to your `PATH`, or install with:
@@ -44,6 +46,7 @@ cargo install --path storeshots
 cargo install --path gads
 cargo install --path model-use
 cargo install --path disk-sweep
+cargo install --path mail-sweep
 # or from crates.io:
 cargo install model-use
 ```
@@ -90,6 +93,17 @@ disk-sweep scan --json
 disk-sweep review ~/Library/Developer --json
 ```
 
+**Triage email with AI (IMAP sync + classification):**
+
+```bash
+mail-sweep accounts add --id personal --email you@gmail.com --gmail
+mail-sweep secrets set-openrouter-key --key sk-or-v1-...
+mail-sweep secrets set-account --id personal --password '...'
+mail-sweep sync --json
+mail-sweep process --dry-run --json
+mail-sweep
+```
+
 Full docs: [gads/README.md](./gads/README.md). Agent skill: [gads/skills/gads-cli/](./gads/skills/gads-cli/).
 
 ## Configuration
@@ -102,6 +116,7 @@ Full docs: [gads/README.md](./gads/README.md). Agent skill: [gads/skills/gads-cl
 | gads | `~/.config/gads/credentials.json` + optional `gads.toml` |
 | model-use | `~/.config/model-use/config.toml` |
 | disk-sweep | `~/.config/disk-sweep/config.toml` |
+| mail-sweep | `~/.config/mail-sweep/config.toml` |
 
 All tools also accept CLI flags and environment variables — see each tool’s README for details.
 

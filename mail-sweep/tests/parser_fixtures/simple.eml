@@ -1,0 +1,8 @@
+From: newsletter@example.com
+To: you@example.com
+Subject: Test Subject
+Date: Mon, 1 Jan 2024 12:00:00 +0000
+List-Unsubscribe: <mailto:unsub@example.com>
+Content-Type: text/plain; charset=utf-8
+
+Hello, this is a test newsletter message.
