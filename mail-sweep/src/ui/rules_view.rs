@@ -23,6 +23,60 @@ pub const RULE_CATEGORIES: &[&str] = &[
 
 const UNCATEGORIZED: &str = "uncategorized";
 
+/// Filter Rules list by teach action (same keys as Triage: z/g/i/o).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActionFilter {
+    #[default]
+    All,
+    Delete,
+    Archive,
+    Flag,
+    Keep,
+}
+
+impl ActionFilter {
+    pub fn from_key(c: char) -> Option<Self> {
+        match c {
+            'z' => Some(Self::Delete),
+            'g' => Some(Self::Archive),
+            'i' => Some(Self::Flag),
+            'o' => Some(Self::Keep),
+            '0' | '*' | '.' => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn matches(self, action: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Delete => action == "delete",
+            Self::Archive => action == "archive",
+            Self::Flag => action == "flag",
+            Self::Keep => action == "keep",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Delete => "delete (z)",
+            Self::Archive => "archive (g)",
+            Self::Flag => "flag (i)",
+            Self::Keep => "keep (o)",
+        }
+    }
+
+    pub fn action_name(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Delete => Some("delete"),
+            Self::Archive => Some("archive"),
+            Self::Flag => Some("flag"),
+            Self::Keep => Some("keep"),
+        }
+    }
+}
+
 pub fn category_options() -> Vec<&'static str> {
     let mut options: Vec<&'static str> = RULE_CATEGORIES.to_vec();
     options.push(UNCATEGORIZED);
@@ -54,22 +108,34 @@ pub fn selected_category_index(rule: &RuleConfig) -> usize {
         .unwrap_or(0)
 }
 
-/// Rule indices in grouped display order (top to bottom).
-pub fn ordered_rule_indices(rules: &[RuleConfig]) -> Vec<usize> {
-    build_grouped_list(rules).visual_to_rule
+/// Rule indices in grouped display order (top to bottom), optionally filtered by action.
+pub fn ordered_rule_indices(rules: &[RuleConfig], filter: ActionFilter) -> Vec<usize> {
+    build_grouped_list(rules, filter).visual_to_rule
+}
+
+pub fn visible_rule_count(rules: &[RuleConfig], filter: ActionFilter) -> usize {
+    ordered_rule_indices(rules, filter).len()
 }
 
 /// Map list selection position to config rule index.
-pub fn resolve_rule_index(rules: &[RuleConfig], visual_selected: usize) -> usize {
-    ordered_rule_indices(rules)
+pub fn resolve_rule_index(
+    rules: &[RuleConfig],
+    visual_selected: usize,
+    filter: ActionFilter,
+) -> usize {
+    ordered_rule_indices(rules, filter)
         .get(visual_selected)
         .copied()
         .unwrap_or(0)
 }
 
-/// Map config rule index to list selection position after reordering.
-pub fn visual_index_for_rule(rules: &[RuleConfig], rule_index: usize) -> usize {
-    ordered_rule_indices(rules)
+/// Map config rule index to list selection position after reordering/filtering.
+pub fn visual_index_for_rule(
+    rules: &[RuleConfig],
+    rule_index: usize,
+    filter: ActionFilter,
+) -> usize {
+    ordered_rule_indices(rules, filter)
         .iter()
         .position(|&i| i == rule_index)
         .unwrap_or(0)
@@ -82,11 +148,14 @@ struct GroupedRulesList {
     category_count: usize,
 }
 
-fn build_grouped_list(rules: &[RuleConfig]) -> GroupedRulesList {
+fn build_grouped_list(rules: &[RuleConfig], filter: ActionFilter) -> GroupedRulesList {
     use std::collections::HashMap;
 
     let mut by_cat: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, rule) in rules.iter().enumerate() {
+        if !filter.matches(&rule.action) {
+            continue;
+        }
         let key = rule
             .category
             .as_deref()
@@ -99,8 +168,8 @@ fn build_grouped_list(rules: &[RuleConfig]) -> GroupedRulesList {
     cat_keys.sort_by_key(|k| category_sort_key(k));
 
     let mut items = Vec::new();
-    let mut visual_to_rule = Vec::with_capacity(rules.len());
-    let mut visual_to_list_row = Vec::with_capacity(rules.len());
+    let mut visual_to_rule = Vec::new();
+    let mut visual_to_list_row = Vec::new();
 
     for cat in &cat_keys {
         let indices = &by_cat[cat];
@@ -128,10 +197,7 @@ fn category_header_item(category: &str, count: usize) -> ListItem<'static> {
                 .fg(ACCENT2)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("({count})"),
-            Style::default().fg(MUTED),
-        ),
+        Span::styled(format!("({count})"), Style::default().fg(MUTED)),
     ]))
 }
 
@@ -150,6 +216,7 @@ pub fn render_rules(
     rules: &[RuleConfig],
     visual_selected: usize,
     list_state: &mut ListState,
+    filter: ActionFilter,
 ) {
     let keys_h = panel_keys_height(Tab::Rules);
     let chunks = Layout::default()
@@ -172,17 +239,48 @@ pub fn render_rules(
         return;
     }
 
-    let grouped = build_grouped_list(rules);
+    let grouped = build_grouped_list(rules, filter);
+    if grouped.visual_to_rule.is_empty() {
+        let label = filter.label();
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("No {label} rules."),
+                    Style::default().fg(MUTED),
+                )),
+                Line::from(""),
+                Line::from("Press z/g/i/o to filter by action, 0 to show all."),
+            ])
+            .block(panel_block(&format!(
+                "Rules — filter: {label} · {} total",
+                rules.len()
+            ))),
+            chunks[0],
+        );
+        render_panel_keys(chunks[1], f, Tab::Rules);
+        return;
+    }
+
     let visual_selected = visual_selected.min(grouped.visual_to_rule.len().saturating_sub(1));
     let list_row = grouped.visual_to_list_row[visual_selected];
 
     list_state.select(Some(list_row));
 
-    let title = format!(
-        "Rules — {} rules · {} categories",
-        rules.len(),
-        grouped.category_count
-    );
+    let shown = grouped.visual_to_rule.len();
+    let title = if filter == ActionFilter::All {
+        format!(
+            "Rules — {shown} rules · {} categories",
+            grouped.category_count
+        )
+    } else {
+        format!(
+            "Rules — {}/{} {} · filter: {} · 0=all",
+            shown,
+            rules.len(),
+            filter.action_name().unwrap_or(""),
+            filter.label(),
+        )
+    };
 
     let list = List::new(grouped.items)
         .block(panel_block(&title))
@@ -266,12 +364,12 @@ pub fn render_category_picker(
 mod tests {
     use super::*;
 
-    fn rule(cat: Option<&str>) -> RuleConfig {
+    fn rule(cat: Option<&str>, action: &str) -> RuleConfig {
         RuleConfig {
             id: None,
             r#match: "subject:test".into(),
             category: cat.map(|s| s.into()),
-            action: "archive".into(),
+            action: action.into(),
             priority: None,
             target_folder: None,
         }
@@ -280,12 +378,12 @@ mod tests {
     #[test]
     fn groups_by_category_in_order() {
         let rules = vec![
-            rule(Some("newsletter")),
-            rule(None),
-            rule(Some("priority")),
-            rule(Some("newsletter")),
+            rule(Some("newsletter"), "archive"),
+            rule(None, "archive"),
+            rule(Some("priority"), "flag"),
+            rule(Some("newsletter"), "archive"),
         ];
-        let grouped = build_grouped_list(&rules);
+        let grouped = build_grouped_list(&rules, ActionFilter::All);
         assert_eq!(grouped.category_count, 3);
         assert_eq!(grouped.visual_to_rule, vec![2, 0, 3, 1]);
         assert_eq!(grouped.visual_to_list_row, vec![1, 3, 4, 6]);
@@ -294,16 +392,34 @@ mod tests {
     #[test]
     fn visual_navigation_matches_display_order() {
         let rules = vec![
-            rule(Some("newsletter")),
-            rule(None),
-            rule(Some("priority")),
-            rule(Some("newsletter")),
+            rule(Some("newsletter"), "archive"),
+            rule(None, "archive"),
+            rule(Some("priority"), "flag"),
+            rule(Some("newsletter"), "archive"),
         ];
-        assert_eq!(resolve_rule_index(&rules, 0), 2);
-        assert_eq!(resolve_rule_index(&rules, 1), 0);
-        assert_eq!(resolve_rule_index(&rules, 2), 3);
-        assert_eq!(resolve_rule_index(&rules, 3), 1);
-        assert_eq!(visual_index_for_rule(&rules, 0), 1);
-        assert_eq!(visual_index_for_rule(&rules, 1), 3);
+        assert_eq!(resolve_rule_index(&rules, 0, ActionFilter::All), 2);
+        assert_eq!(resolve_rule_index(&rules, 1, ActionFilter::All), 0);
+        assert_eq!(resolve_rule_index(&rules, 2, ActionFilter::All), 3);
+        assert_eq!(resolve_rule_index(&rules, 3, ActionFilter::All), 1);
+        assert_eq!(visual_index_for_rule(&rules, 0, ActionFilter::All), 1);
+        assert_eq!(visual_index_for_rule(&rules, 1, ActionFilter::All), 3);
+    }
+
+    #[test]
+    fn action_filter_shows_only_matching() {
+        let rules = vec![
+            rule(Some("spam"), "delete"),
+            rule(Some("newsletter"), "archive"),
+            rule(Some("priority"), "flag"),
+            rule(Some("personal"), "keep"),
+            rule(Some("spam"), "delete"),
+        ];
+        assert_eq!(
+            ordered_rule_indices(&rules, ActionFilter::Delete),
+            vec![0, 4]
+        );
+        assert_eq!(ordered_rule_indices(&rules, ActionFilter::Keep), vec![3]);
+        assert_eq!(visible_rule_count(&rules, ActionFilter::Flag), 1);
+        assert_eq!(visible_rule_count(&rules, ActionFilter::All), 5);
     }
 }

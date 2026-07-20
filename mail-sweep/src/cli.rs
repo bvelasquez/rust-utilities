@@ -66,7 +66,7 @@ pub enum Commands {
     Sync {
         #[arg(long, help = "Sync only this account id")]
         account: Option<String>,
-        #[arg(long, help = "Re-fetch recent UIDs (last 500)")]
+        #[arg(long, help = "Backfill more recent mail (up to sync.full_fetch_limit, default 500)")]
         full: bool,
     },
     /// Classify pending messages with rules + OpenRouter
@@ -175,8 +175,10 @@ pub enum AccountsCommands {
         smtp_host: String,
         #[arg(long, default_value_t = 587)]
         smtp_port: u16,
-        #[arg(long, help = "Use Gmail folder defaults")]
+        #[arg(long, help = "Use Gmail IMAP/SMTP + folder defaults")]
         gmail: bool,
+        #[arg(long, help = "Use iCloud Mail IMAP/SMTP + folder defaults (app-specific password)")]
+        icloud: bool,
         #[arg(long, help = "IMAP/SMTP password (saved to secrets.toml)")]
         password: Option<String>,
     },

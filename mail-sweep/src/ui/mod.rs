@@ -1,4 +1,5 @@
 mod actions;
+mod analytics;
 mod footer;
 mod help;
 mod keys;
@@ -34,13 +35,17 @@ use crate::agent::schema::RuleAuditPlan;
 use crate::commands::CommandContext;
 use crate::config::{save_config_file, RuleConfig};
 use crate::process::{self, TeachReport};
+use crate::rules::{find_subsumed_rules, remove_rules_at};
 use crate::rules::patterns::{subject_pattern_from, validate_pattern};
-use crate::store::{CachedMessage, PendingSenderGroup, Store};
+use crate::store::{
+    AnalyticsPeriod, AppliedAnalytics, CachedMessage, PendingSenderGroup, Store,
+};
 use footer::{Activity, render_footer};
+use pattern_prompt::PatternEditFocus;
 use rule_overlays::{accepted_suggestions, SuggestItem};
 use rules_view::{
     category_options, render_category_picker, resolve_rule_index, selected_category_index,
-    visual_index_for_rule,
+    visible_rule_count, visual_index_for_rule, ActionFilter,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +95,8 @@ enum OverlayMode {
     None,
     PatternEdit {
         buffer: String,
+        desc: String,
+        focus: PatternEditFocus,
         context: PatternEditContext,
     },
     PatternAction {
@@ -114,6 +121,14 @@ enum OverlayMode {
         rule_index: usize,
         selected: usize,
     },
+    /// Deterministic: rules covered by a broader keeper (same action).
+    SubsumeAudit {
+        keeper_index: usize,
+        keeper_pattern: String,
+        candidates: Vec<crate::rules::SubsumedRule>,
+        selected: usize,
+        accepted: Vec<usize>,
+    },
 }
 
 struct UiSnapshot<'a> {
@@ -133,6 +148,8 @@ struct UiSnapshot<'a> {
     show_help: bool,
     help_scroll: usize,
     overlay: OverlayMode,
+    rules_filter: ActionFilter,
+    analytics: &'a AppliedAnalytics,
 }
 
 const SENDER_GROUP_LIMIT: usize = 500;
@@ -146,6 +163,8 @@ struct LoopState {
     show_help: bool,
     help_scroll: usize,
     overlay: OverlayMode,
+    rules_filter: ActionFilter,
+    analytics_period: AnalyticsPeriod,
 }
 
 struct ScrollStates {
@@ -166,12 +185,19 @@ fn redraw(
 ) -> Result<()> {
     let store = Store::open(&ctx.app.db_path())?;
     let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
-    let queue = store.review_queue(ctx.app.config.safety.require_review_above)?;
+    let queue = store.review_queue(ctx.app.config.safety.review_threshold())?;
     let pending = store.pending_count(None)?;
     let queued = queue.len() as i64;
     let plan_total = store.pending_plan_message_count()?;
     let cached_total = store.total_count(None)?;
     let rules = ctx.app.config.rules.clone();
+    let analytics = store
+        .applied_analytics(state.analytics_period)
+        .unwrap_or_else(|_| AppliedAnalytics {
+            period: state.analytics_period,
+            buckets: vec![],
+            totals: Default::default(),
+        });
 
     terminal.draw(|f| {
         draw_ui(
@@ -194,6 +220,8 @@ fn redraw(
                 show_help: state.show_help,
                 help_scroll: state.help_scroll,
                 overlay: state.overlay.clone(),
+                rules_filter: state.rules_filter,
+                analytics: &analytics,
             },
             scroll,
         );
@@ -213,11 +241,17 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
         tab: Tab::Triage,
         selected: 0,
         rules_selected: 0,
-        activity: Activity::Ready,
-        auto_on: false,
+        activity: if ctx.app.config.sync.auto_process {
+            Activity::AutoIdle
+        } else {
+            Activity::Ready
+        },
+        auto_on: ctx.app.config.sync.auto_process,
         show_help: false,
         help_scroll: 0,
         overlay: OverlayMode::None,
+        rules_filter: ActionFilter::All,
+        analytics_period: AnalyticsPeriod::Day,
     };
     let mut scroll = ScrollStates {
         triage_table: TableState::default(),
@@ -227,7 +261,12 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
         suggest_list: ListState::default(),
         category_list: ListState::default(),
     };
-    let mut last_auto = Instant::now();
+    let mut last_auto = if state.auto_on {
+        // Run first AUTO cycle soon after startup when preference is on.
+        Instant::now() - Duration::from_secs(1)
+    } else {
+        Instant::now()
+    };
     let poll = auto_interval(ctx);
     let poll_label = poll_label(&poll);
 
@@ -238,7 +277,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
     loop {
         let store = Store::open(&ctx.app.db_path())?;
         let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
-        let queue = store.review_queue(ctx.app.config.safety.require_review_above)?;
+        let queue = store.review_queue(ctx.app.config.safety.review_threshold())?;
         let pending = store.pending_count(None)?;
         let rules = ctx.app.config.rules.clone();
 
@@ -252,6 +291,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
             &sender_groups,
             &queue,
             &rules,
+            state.rules_filter,
             &mut state.selected,
             &mut state.rules_selected,
         );
@@ -283,14 +323,29 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     }
                     continue;
                 }
+                if matches!(state.overlay, OverlayMode::PatternEdit { .. })
+                    && is_ai_pattern_generate_key(key.code, key.modifiers)
+                {
+                    run_pattern_from_desc(
+                        &mut terminal,
+                        ctx,
+                        &mut state,
+                        &mut scroll,
+                        &poll_label,
+                    )
+                    .await;
+                    continue;
+                }
                 if !matches!(state.overlay, OverlayMode::None)
                     && handle_overlay_key(
                         &mut state.overlay,
                         key.code,
+                        key.modifiers,
                         &store,
                         &sender_groups,
                         state.selected,
                         &mut state.rules_selected,
+                        state.rules_filter,
                         ctx,
                         &mut state.activity,
                     )
@@ -299,6 +354,12 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                 }
 
                 let sample_msg = sample_message(&store, &sender_groups, state.selected);
+                let review_msg = queue.get(state.selected).cloned();
+                let teach_msg = match state.tab {
+                    Tab::Review => review_msg.as_ref(),
+                    Tab::Triage => sample_msg.as_ref(),
+                    _ => None,
+                };
 
                 match key.code {
                     KeyCode::Char('q') => break,
@@ -319,8 +380,11 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             state.selected = (state.selected + 1).min(queue.len() - 1);
                         }
                         Tab::Rules if !rules.is_empty() => {
-                            state.rules_selected =
-                                (state.rules_selected + 1).min(rules.len() - 1);
+                            let n = visible_rule_count(&rules, state.rules_filter);
+                            if n > 0 {
+                                state.rules_selected =
+                                    (state.rules_selected + 1).min(n - 1);
+                            }
                         }
                         _ => {}
                     },
@@ -333,9 +397,20 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         }
                         _ => {}
                     },
+                    KeyCode::Char('.') if state.tab == Tab::Triage => {
+                        state.analytics_period = state.analytics_period.next();
+                        state.activity = Activity::Success(format!(
+                            "Analytics: {}",
+                            state.analytics_period.title()
+                        ));
+                    }
                     KeyCode::Char('A') => {
                         state.auto_on = !state.auto_on;
-                        if state.auto_on {
+                        ctx.app.config.sync.auto_process = state.auto_on;
+                        if let Err(e) = ctx.app.save_config() {
+                            state.activity =
+                                Activity::Error(format!("Could not save AUTO preference: {e}"));
+                        } else if state.auto_on {
                             state.activity = Activity::AutoIdle;
                             last_auto = Instant::now() - poll;
                         } else {
@@ -349,12 +424,32 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         run_classify(&mut terminal, ctx, &mut state, &mut scroll, &poll_label).await;
                     }
                     KeyCode::Char('x') if state.tab == Tab::Rules => {
-                        run_rules_audit(&mut terminal, ctx, &mut state, &mut scroll, &poll_label).await;
+                        open_subsume_for_selected(&store, &rules, &mut state);
+                    }
+                    KeyCode::Char('X') if state.tab == Tab::Rules => {
+                        run_rules_audit(&mut terminal, ctx, &mut state, &mut scroll, &poll_label)
+                            .await;
                     }
                     KeyCode::Char('a')
                         if matches!(state.tab, Tab::Triage | Tab::Review) =>
                     {
                         run_apply(&mut terminal, ctx, &mut state.activity).await;
+                    }
+                    KeyCode::Char('r') if state.tab == Tab::Review => {
+                        if let Some(msg) = teach_msg {
+                            match store.reject_from_plan(&msg.account_id, msg.uid) {
+                                Ok(_) => {
+                                    state.activity = Activity::Success(format!(
+                                        "Rejected — {} back to Triage (not applied)",
+                                        short_addr(&msg.from_address)
+                                    ));
+                                }
+                                Err(e) => {
+                                    state.activity =
+                                        Activity::Error(format!("Reject failed: {e}"));
+                                }
+                            }
+                        }
                     }
                     KeyCode::Char('p') if state.tab == Tab::Triage => {
                         run_pattern_suggest(
@@ -368,8 +463,8 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         )
                         .await;
                     }
-                    KeyCode::Char('z') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('z') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
                                 process::teach_junk_message(ctx, msg, false),
@@ -377,8 +472,8 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             );
                         }
                     }
-                    KeyCode::Char('Z') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('Z') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
                                 process::teach_junk_message(ctx, msg, true),
@@ -390,66 +485,105 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         if let Some(msg) = &sample_msg {
                             state.overlay = OverlayMode::PatternEdit {
                                 buffer: subject_pattern_from(&msg.subject),
+                                desc: String::new(),
+                                focus: PatternEditFocus::Pattern,
                                 context: PatternEditContext::TriageTeach,
                             };
                         }
                     }
-                    KeyCode::Char('g') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('g') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
-                                process::teach_message_subject(ctx, msg, "archive", Some("newsletter"), 2),
+                                process::teach_message_subject(
+                                    ctx,
+                                    msg,
+                                    "archive",
+                                    Some("newsletter"),
+                                    2,
+                                ),
                                 "Archive subject",
                             );
                         }
                     }
-                    KeyCode::Char('G') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('G') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
-                                process::teach_message_sender(ctx, msg, "archive", Some("newsletter"), 2),
+                                process::teach_message_sender(
+                                    ctx,
+                                    msg,
+                                    "archive",
+                                    Some("newsletter"),
+                                    2,
+                                ),
                                 "Archive sender",
                             );
                         }
                     }
-                    KeyCode::Char('i') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('i') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
-                                process::teach_message_subject(ctx, msg, "flag", Some("priority"), 5),
+                                process::teach_message_subject(
+                                    ctx,
+                                    msg,
+                                    "flag",
+                                    Some("priority"),
+                                    5,
+                                ),
                                 "Important subject",
                             );
                         }
                     }
-                    KeyCode::Char('I') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('I') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
-                                process::teach_message_sender(ctx, msg, "flag", Some("priority"), 5),
+                                process::teach_message_sender(
+                                    ctx,
+                                    msg,
+                                    "flag",
+                                    Some("priority"),
+                                    5,
+                                ),
                                 "Important sender",
                             );
                         }
                     }
-                    KeyCode::Char('o') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('o') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
-                                process::teach_message_subject(ctx, msg, "keep", Some("personal"), 4),
+                                process::teach_message_subject(
+                                    ctx,
+                                    msg,
+                                    "keep",
+                                    Some("personal"),
+                                    4,
+                                ),
                                 "Keep subject",
                             );
                         }
                     }
-                    KeyCode::Char('O') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                    KeyCode::Char('O') if matches!(state.tab, Tab::Triage | Tab::Review) => {
+                        if let Some(msg) = teach_msg {
                             apply_teach_activity(
                                 &mut state.activity,
-                                process::teach_message_sender(ctx, msg, "keep", Some("personal"), 4),
+                                process::teach_message_sender(
+                                    ctx,
+                                    msg,
+                                    "keep",
+                                    Some("personal"),
+                                    4,
+                                ),
                                 "Keep sender",
                             );
                         }
                     }
                     KeyCode::Char('c') if state.tab == Tab::Rules && !rules.is_empty() => {
-                        let rule_index = resolve_rule_index(&rules, state.rules_selected);
+                        let rule_index =
+                            resolve_rule_index(&rules, state.rules_selected, state.rules_filter);
                         let selected = selected_category_index(&rules[rule_index]);
                         scroll.category_list = ListState::default();
                         state.overlay = OverlayMode::CategoryPick {
@@ -458,15 +592,19 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         };
                     }
                     KeyCode::Char('e') if state.tab == Tab::Rules && !rules.is_empty() => {
-                        let rule_index = resolve_rule_index(&rules, state.rules_selected);
+                        let rule_index =
+                            resolve_rule_index(&rules, state.rules_selected, state.rules_filter);
                         let rule = &rules[rule_index];
                         state.overlay = OverlayMode::PatternEdit {
                             buffer: rule.r#match.clone(),
+                            desc: String::new(),
+                            focus: PatternEditFocus::Pattern,
                             context: PatternEditContext::RulesEdit { index: rule_index },
                         };
                     }
                     KeyCode::Char('t') if state.tab == Tab::Rules && !rules.is_empty() => {
-                        let rule_index = resolve_rule_index(&rules, state.rules_selected);
+                        let rule_index =
+                            resolve_rule_index(&rules, state.rules_selected, state.rules_filter);
                         let pattern = rules[rule_index].r#match.clone();
                         let matches = store
                             .messages_matching_pattern(&pattern, 5000, 5)
@@ -491,11 +629,47 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             Err(e) => state.activity = Activity::Error(format!("Rule error: {e}")),
                         }
                     }
-                    KeyCode::Char('d') if state.tab == Tab::Rules => {
-                        let rule_index = resolve_rule_index(&rules, state.rules_selected);
+                    KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace
+                        if state.tab == Tab::Rules
+                            && visible_rule_count(&rules, state.rules_filter) > 0 =>
+                    {
+                        let rule_index =
+                            resolve_rule_index(&rules, state.rules_selected, state.rules_filter);
+                        let pattern = rules
+                            .get(rule_index)
+                            .map(|r| r.r#match.clone())
+                            .unwrap_or_default();
                         match remove_rule(ctx, rule_index) {
-                            Ok(()) => state.activity = Activity::Success("Rule removed".into()),
-                            Err(e) => state.activity = Activity::Error(format!("Rule error: {e}")),
+                            Ok(()) => {
+                                let n = visible_rule_count(
+                                    &ctx.app.config.rules,
+                                    state.rules_filter,
+                                );
+                                if n == 0 {
+                                    state.rules_selected = 0;
+                                } else {
+                                    state.rules_selected =
+                                        state.rules_selected.min(n - 1);
+                                }
+                                state.activity = Activity::Success(format!(
+                                    "Deleted rule: {pattern}"
+                                ));
+                            }
+                            Err(e) => {
+                                state.activity = Activity::Error(format!("Rule error: {e}"))
+                            }
+                        }
+                    }
+                    KeyCode::Char(c @ ('z' | 'g' | 'i' | 'o' | '0' | '*' | '.'))
+                        if state.tab == Tab::Rules =>
+                    {
+                        if let Some(filter) = ActionFilter::from_key(c) {
+                            state.rules_filter = filter;
+                            state.rules_selected = 0;
+                            state.activity = Activity::Success(format!(
+                                "Rules filter: {}",
+                                filter.label()
+                            ));
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -601,6 +775,7 @@ fn draw_ui(
             snap.pending,
             snap.selected,
             &mut scroll.triage_table,
+            snap.analytics,
         ),
         Tab::Review => queue::render_queue(
             f,
@@ -616,6 +791,7 @@ fn draw_ui(
             snap.rules,
             snap.rules_selected,
             &mut scroll.rules_list,
+            snap.rules_filter,
         ),
         Tab::Setup => {
             let account_lines: Vec<Line> = if ctx.app.config.accounts.is_empty() {
@@ -638,7 +814,12 @@ fn draw_ui(
         help::render_help(f, centered_rect(72, 85, f.area()), snap.help_scroll);
     } else {
         match &snap.overlay {
-            OverlayMode::PatternEdit { buffer, context } => {
+            OverlayMode::PatternEdit {
+                buffer,
+                desc,
+                focus,
+                context,
+            } => {
                 let title = match context {
                     PatternEditContext::TriageTeach => " custom rule pattern ",
                     PatternEditContext::RulesEdit { .. } => " edit rule pattern ",
@@ -656,8 +837,10 @@ fn draw_ui(
                 };
                 pattern_prompt::render_pattern_editor(
                     f,
-                    centered_rect(70, 45, f.area()),
+                    centered_rect(74, 62, f.area()),
                     buffer,
+                    desc,
+                    *focus,
                     title,
                     match_count,
                 );
@@ -717,9 +900,164 @@ fn draw_ui(
                     );
                 }
             }
+            OverlayMode::SubsumeAudit {
+                keeper_pattern,
+                candidates,
+                selected,
+                accepted,
+                ..
+            } => rule_overlays::render_subsume_audit(
+                f,
+                centered_rect(72, 75, f.area()),
+                keeper_pattern,
+                candidates,
+                *selected,
+                accepted,
+                &mut scroll.audit_list,
+            ),
             OverlayMode::None => {}
         }
     }
+}
+
+fn is_ai_pattern_generate_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    // F5 is reliable in every terminal (Ctrl combos are often eaten or remapped).
+    if matches!(code, KeyCode::F(5)) {
+        return true;
+    }
+    if !modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(
+        code,
+        KeyCode::Char('g')
+            | KeyCode::Char('G')
+            | KeyCode::Enter
+            | KeyCode::Char('\n')
+            | KeyCode::Char('j')
+            | KeyCode::Char('J')
+    )
+}
+
+async fn run_pattern_from_desc(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ctx: &CommandContext,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
+) {
+    let OverlayMode::PatternEdit { buffer, desc, focus, .. } = &state.overlay else {
+        return;
+    };
+    if desc.trim().is_empty() {
+        state.activity = Activity::Error(
+            "Tab to description, type what to match, then press F5 to generate".into(),
+        );
+        return;
+    }
+    let description = desc.clone();
+    let current = buffer.clone();
+    let _ = focus;
+
+    state.activity = Activity::Success("Generating pattern via OpenRouter…".into());
+    redraw(terminal, ctx, state, scroll, poll_label).ok();
+    state.activity = Activity::Classifying;
+    redraw(terminal, ctx, state, scroll, poll_label).ok();
+
+    match crate::agent::pattern_from_desc::pattern_from_description(
+        &ctx.app,
+        &description,
+        if current.trim().is_empty() {
+            None
+        } else {
+            Some(current.as_str())
+        },
+    )
+    .await
+    {
+        Ok(pattern) => {
+            if let OverlayMode::PatternEdit {
+                buffer,
+                focus,
+                ..
+            } = &mut state.overlay
+            {
+                *buffer = pattern.clone();
+                *focus = PatternEditFocus::Pattern;
+            }
+            state.activity = Activity::Success(format!("AI filled pattern: {pattern}"));
+        }
+        Err(e) => {
+            state.activity = Activity::Error(format!("Pattern AI failed: {e}"));
+        }
+    }
+}
+
+fn open_subsume_for_selected(
+    store: &Store,
+    rules: &[RuleConfig],
+    state: &mut LoopState,
+) {
+    if rules.is_empty() {
+        state.activity = Activity::Error("No rules to audit".into());
+        return;
+    }
+    let keeper_index = resolve_rule_index(rules, state.rules_selected, state.rules_filter);
+    let covered = find_subsumed_rules(rules, keeper_index, store);
+    if covered.is_empty() {
+        state.activity = Activity::Success(format!(
+            "No covered duplicates for {}",
+            rules[keeper_index].r#match
+        ));
+        return;
+    }
+    let n = covered.len();
+    state.overlay = OverlayMode::SubsumeAudit {
+        keeper_pattern: rules[keeper_index].r#match.clone(),
+        keeper_index,
+        candidates: covered,
+        selected: 0,
+        accepted: (0..n).collect(),
+    };
+    state.activity = Activity::Success(format!(
+        "Found {n} rule(s) covered by broader pattern — review to remove"
+    ));
+}
+
+fn open_subsume_after_edit(
+    overlay: &mut OverlayMode,
+    activity: &mut Activity,
+    ctx: &CommandContext,
+    store: &Store,
+    keeper_index: usize,
+    label: &str,
+) {
+    let rules = &ctx.app.config.rules;
+    if keeper_index >= rules.len() {
+        *activity = Activity::Success(label.into());
+        *overlay = OverlayMode::None;
+        return;
+    }
+    let covered = find_subsumed_rules(rules, keeper_index, store);
+    if covered.is_empty() {
+        *activity = Activity::Success(format!(
+            "{label}: {} — no covered duplicates",
+            rules[keeper_index].r#match
+        ));
+        *overlay = OverlayMode::None;
+        return;
+    }
+    let n = covered.len();
+    *overlay = OverlayMode::SubsumeAudit {
+        keeper_pattern: rules[keeper_index].r#match.clone(),
+        keeper_index,
+        candidates: covered,
+        selected: 0,
+        accepted: (0..n).collect(),
+    };
+    *activity = Activity::Success(format!(
+        "{label} — {n} covered rule(s) to review (Space/a)"
+    ));
 }
 
 fn sample_message(
@@ -729,6 +1067,14 @@ fn sample_message(
 ) -> Option<CachedMessage> {
     let group = groups.get(selected)?;
     store.get_message(group.sample_message_id).ok().flatten()
+}
+
+fn short_addr(addr: &str) -> String {
+    if addr.chars().count() <= 28 {
+        addr.to_string()
+    } else {
+        format!("{}…", addr.chars().take(27).collect::<String>())
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -820,8 +1166,6 @@ async fn run_auto_cycle(
     poll_label: &str,
     last_auto: &mut Instant,
 ) {
-    use crate::agent::schema::ClassificationPlan;
-
     state.activity = Activity::Syncing;
     redraw(terminal, ctx, state, scroll, poll_label).ok();
 
@@ -834,22 +1178,12 @@ async fn run_auto_cycle(
 
     let apply_result: Result<Option<String>, anyhow::Error> = async {
         let store = Store::open(&ctx.app.db_path())?;
-        let Some(stored) = store.latest_pending_plan()? else {
+        if store.latest_pending_plan()?.is_none() {
             return Ok(None);
-        };
-        let plan: ClassificationPlan =
-            serde_json::from_str(&stored.json_plan).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let deletes = plan
-            .messages
-            .iter()
-            .filter(|m| m.action.is_destructive())
-            .count();
-        if deletes > 0 {
-            return Ok(Some(format!("{deletes} deletes need Review before apply")));
         }
         state.activity = Activity::Applying;
         redraw(terminal, ctx, state, scroll, poll_label)?;
-        let summary = actions::do_apply(ctx, None).await?;
+        let summary = actions::do_apply_auto(ctx).await?;
         Ok(Some(summary))
     }
     .await;
@@ -876,6 +1210,7 @@ fn clamp_selection(
     groups: &[PendingSenderGroup],
     queue: &[CachedMessage],
     rules: &[RuleConfig],
+    rules_filter: ActionFilter,
     selected: &mut usize,
     rules_selected: &mut usize,
 ) {
@@ -886,8 +1221,13 @@ fn clamp_selection(
         Tab::Review if !queue.is_empty() => {
             *selected = (*selected).min(queue.len() - 1);
         }
-        Tab::Rules if !rules.is_empty() => {
-            *rules_selected = (*rules_selected).min(rules.len() - 1);
+        Tab::Rules => {
+            let n = visible_rule_count(rules, rules_filter);
+            if n > 0 {
+                *rules_selected = (*rules_selected).min(n - 1);
+            } else {
+                *rules_selected = 0;
+            }
         }
         _ => {}
     }
@@ -935,7 +1275,8 @@ async fn run_rules_audit(
                 scroll.audit_list = ListState::default();
                 state.overlay = OverlayMode::RuleAudit {
                     selected: 0,
-                    accepted: (0..plan.suggestions.len()).collect(),
+                    // Never pre-accept — a mass-retire suggestion + Enter used to wipe rules.
+                    accepted: Vec::new(),
                     plan,
                 };
                 state.activity = Activity::Success("Review audit suggestions".into());
@@ -1071,98 +1412,132 @@ fn update_rule_category(
 fn handle_overlay_key(
     overlay: &mut OverlayMode,
     code: KeyCode,
+    modifiers: KeyModifiers,
     store: &Store,
     groups: &[PendingSenderGroup],
     selected: usize,
     rules_selected: &mut usize,
+    rules_filter: ActionFilter,
     ctx: &mut CommandContext,
     activity: &mut Activity,
 ) -> bool {
     let msg = sample_message(store, groups, selected);
     match overlay {
         OverlayMode::None => return false,
-        OverlayMode::PatternEdit { buffer, context } => match code {
+        OverlayMode::PatternEdit {
+            buffer,
+            desc,
+            focus,
+            context,
+        } => match code {
             KeyCode::Esc => *overlay = OverlayMode::None,
-            KeyCode::Enter => {
-                let pattern = buffer.trim().to_string();
-                if pattern.is_empty() || validate_pattern(&pattern).error.is_some() {
-                    return true;
-                }
-                let ctx_copy = *context;
-                *overlay = OverlayMode::PatternAction {
-                    pattern,
-                    context: ctx_copy,
+            KeyCode::Tab => {
+                *focus = match *focus {
+                    PatternEditFocus::Pattern => PatternEditFocus::Desc,
+                    PatternEditFocus::Desc => PatternEditFocus::Pattern,
                 };
             }
-            KeyCode::Backspace => {
-                buffer.pop();
-            }
-            KeyCode::Char(c) if !c.is_control() && buffer.len() < 200 => buffer.push(c),
+            KeyCode::Enter if !modifiers.contains(KeyModifiers::CONTROL) => match *focus {
+                PatternEditFocus::Pattern => {
+                    let pattern = buffer.trim().to_string();
+                    if pattern.is_empty() || validate_pattern(&pattern).error.is_some() {
+                        return true;
+                    }
+                    let ctx_copy = *context;
+                    *overlay = OverlayMode::PatternAction {
+                        pattern,
+                        context: ctx_copy,
+                    };
+                }
+                PatternEditFocus::Desc if desc.len() < 800 => {
+                    desc.push('\n');
+                }
+                PatternEditFocus::Desc => {}
+            },
+            // Swallow generate chords so they never type into the buffer.
+            KeyCode::F(5) => {}
+            KeyCode::Char(c)
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(c, 'g' | 'G' | 'j' | 'J') => {}
+            KeyCode::Backspace => match *focus {
+                PatternEditFocus::Pattern => {
+                    buffer.pop();
+                }
+                PatternEditFocus::Desc => {
+                    desc.pop();
+                }
+            },
+            KeyCode::Char(c) if !c.is_control() => match *focus {
+                PatternEditFocus::Pattern if buffer.len() < 200 => buffer.push(c),
+                PatternEditFocus::Desc if desc.len() < 800 => desc.push(c),
+                _ => {}
+            },
             _ => {}
         },
         OverlayMode::PatternAction { pattern, context } => {
             let pat = pattern.clone();
             let ctx_mode = *context;
-            let finish = |overlay: &mut OverlayMode,
-                          activity: &mut Activity,
-                          label: &str,
-                          result: Result<()>| {
+            let edit_index = match ctx_mode {
+                PatternEditContext::RulesEdit { index } => Some(index),
+                PatternEditContext::TriageTeach => None,
+            };
+            let run = |overlay: &mut OverlayMode,
+                       activity: &mut Activity,
+                       ctx: &mut CommandContext,
+                       store: &Store,
+                       action: &str,
+                       category: Option<&str>,
+                       priority: u8| {
+                let result = apply_rule_action(
+                    ctx,
+                    &ctx_mode,
+                    &pat,
+                    action,
+                    category,
+                    priority,
+                    msg.as_ref(),
+                );
                 match result {
-                    Ok(()) => *activity = Activity::Success(format!("{label}: {pat}")),
-                    Err(e) => *activity = Activity::Error(format!("{label} error: {e}")),
+                    Ok(()) => {
+                        if let Some(idx) = edit_index {
+                            open_subsume_after_edit(overlay, activity, ctx, store, idx, "Rule saved");
+                        } else {
+                            *activity = Activity::Success(format!("Rule saved: {pat}"));
+                            *overlay = OverlayMode::None;
+                        }
+                    }
+                    Err(e) => {
+                        *activity = Activity::Error(format!("Rule saved error: {e}"));
+                        *overlay = OverlayMode::None;
+                    }
                 }
-                *overlay = OverlayMode::None;
             };
             match code {
                 KeyCode::Esc => *overlay = OverlayMode::None,
-                KeyCode::Char('z') => finish(
+                KeyCode::Char('z') => run(
                     overlay,
                     activity,
-                    "Rule saved",
-                    apply_rule_action(ctx, &ctx_mode, &pat, "delete", Some("spam"), 1, msg.as_ref()),
+                    ctx,
+                    store,
+                    "delete",
+                    Some("spam"),
+                    1,
                 ),
-                KeyCode::Char('g') => finish(
+                KeyCode::Char('g') => run(
                     overlay,
                     activity,
-                    "Rule saved",
-                    apply_rule_action(
-                        ctx,
-                        &ctx_mode,
-                        &pat,
-                        "archive",
-                        Some("newsletter"),
-                        2,
-                        msg.as_ref(),
-                    ),
+                    ctx,
+                    store,
+                    "archive",
+                    Some("newsletter"),
+                    2,
                 ),
-                KeyCode::Char('i') => finish(
-                    overlay,
-                    activity,
-                    "Rule saved",
-                    apply_rule_action(
-                        ctx,
-                        &ctx_mode,
-                        &pat,
-                        "flag",
-                        Some("priority"),
-                        5,
-                        msg.as_ref(),
-                    ),
-                ),
-                KeyCode::Char('o') => finish(
-                    overlay,
-                    activity,
-                    "Rule saved",
-                    apply_rule_action(
-                        ctx,
-                        &ctx_mode,
-                        &pat,
-                        "keep",
-                        Some("personal"),
-                        4,
-                        msg.as_ref(),
-                    ),
-                ),
+                KeyCode::Char('i') => {
+                    run(overlay, activity, ctx, store, "flag", Some("priority"), 5)
+                }
+                KeyCode::Char('o') => {
+                    run(overlay, activity, ctx, store, "keep", Some("personal"), 4)
+                }
                 _ => {}
             }
         }
@@ -1196,21 +1571,32 @@ fn handle_overlay_key(
                     .cloned()
                     .collect();
                 if to_apply.is_empty() {
-                    *activity = Activity::Error("No suggestions selected".into());
+                    *activity = Activity::Error(
+                        "No suggestions selected — Space to toggle, then a".into(),
+                    );
                 } else {
-                    let new_rules =
-                        apply_audit_suggestions(&ctx.app.config.rules, &to_apply);
-                    let mut config = ctx.app.config.clone();
-                    config.rules = new_rules;
-                    match save_config_file(&ctx.app.config_path, &config) {
-                        Ok(()) => {
-                            ctx.app.config = config;
-                            *activity = Activity::Success(format!(
-                                "Applied {} audit suggestions",
-                                to_apply.len()
-                            ));
+                    match apply_audit_suggestions(&ctx.app.config.rules, &to_apply) {
+                        Ok(new_rules) => {
+                            let before = ctx.app.config.rules.len();
+                            let mut config = ctx.app.config.clone();
+                            config.rules = new_rules;
+                            match save_config_file(&ctx.app.config_path, &config) {
+                                Ok(()) => {
+                                    let after = config.rules.len();
+                                    ctx.app.config = config;
+                                    *activity = Activity::Success(format!(
+                                        "Applied {} suggestions · rules {before} → {after}",
+                                        to_apply.len()
+                                    ));
+                                }
+                                Err(e) => {
+                                    *activity = Activity::Error(format!("Save failed: {e}"))
+                                }
+                            }
                         }
-                        Err(e) => *activity = Activity::Error(format!("Save failed: {e}")),
+                        Err(e) => {
+                            *activity = Activity::Error(format!("Audit apply blocked: {e}"));
+                        }
                     }
                 }
                 *overlay = OverlayMode::None;
@@ -1262,6 +1648,71 @@ fn handle_overlay_key(
                 *overlay = OverlayMode::None;
             }
         }
+        OverlayMode::SubsumeAudit {
+            keeper_index,
+            keeper_pattern,
+            candidates,
+            selected,
+            accepted,
+        } => match code {
+            KeyCode::Esc => {
+                *activity = Activity::Success(format!(
+                    "Kept all — broader rule saved: {keeper_pattern}"
+                ));
+                *overlay = OverlayMode::None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                *selected = (*selected + 1).min(candidates.len().saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+            }
+            KeyCode::Char(' ') => {
+                if accepted.contains(selected) {
+                    accepted.retain(|&i| i != *selected);
+                } else {
+                    accepted.push(*selected);
+                }
+            }
+            KeyCode::Char('a') => {
+                let to_remove: Vec<usize> = accepted
+                    .iter()
+                    .filter_map(|&i| candidates.get(i).map(|c| c.index))
+                    .collect();
+                if to_remove.is_empty() {
+                    *activity = Activity::Error("No covered rules selected".into());
+                    *overlay = OverlayMode::None;
+                } else {
+                    let keeper_pat = keeper_pattern.clone();
+                    let mut config = ctx.app.config.clone();
+                    remove_rules_at(&mut config.rules, &to_remove);
+                    // Keeper index may have shifted after removals.
+                    let new_keeper = config
+                        .rules
+                        .iter()
+                        .position(|r| r.r#match == keeper_pat)
+                        .unwrap_or(0);
+                    match save_config_file(&ctx.app.config_path, &config) {
+                        Ok(()) => {
+                            ctx.app.config = config;
+                            *rules_selected = visual_index_for_rule(
+                                &ctx.app.config.rules,
+                                new_keeper,
+                                rules_filter,
+                            );
+                            *activity = Activity::Success(format!(
+                                "Removed {} covered rule(s) under {keeper_pat}",
+                                to_remove.len()
+                            ));
+                        }
+                        Err(e) => *activity = Activity::Error(format!("Save failed: {e}")),
+                    }
+                    let _ = keeper_index;
+                    *overlay = OverlayMode::None;
+                }
+            }
+            _ => {}
+        },
         OverlayMode::CategoryPick {
             rule_index,
             selected,
@@ -1281,8 +1732,11 @@ fn handle_overlay_key(
                     let label = category.unwrap_or("uncategorized");
                     match update_rule_category(ctx, *rule_index, category) {
                         Ok(()) => {
-                            *rules_selected =
-                                visual_index_for_rule(&ctx.app.config.rules, *rule_index);
+                            *rules_selected = visual_index_for_rule(
+                                &ctx.app.config.rules,
+                                *rule_index,
+                                rules_filter,
+                            );
                             *activity = Activity::Success(format!("Category → {label}"));
                         }
                         Err(e) => *activity = Activity::Error(format!("Category error: {e}")),

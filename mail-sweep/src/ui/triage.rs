@@ -3,7 +3,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Row, StatefulWidget, Table, TableState};
 use ratatui::Frame;
 
-use crate::store::PendingSenderGroup;
+use crate::store::{AppliedAnalytics, PendingSenderGroup};
+use crate::ui::analytics::{self, analytics_height};
 use crate::ui::keys::{panel_keys_height, render_panel_keys};
 use crate::ui::theme::{panel_block, selected_row, ACCENT, MUTED, OK, WARN};
 use crate::ui::Tab;
@@ -15,14 +16,22 @@ pub fn render_triage(
     pending_msgs: i64,
     selected: usize,
     table_state: &mut TableState,
+    analytics: &AppliedAnalytics,
 ) {
     let keys_h = panel_keys_height(Tab::Triage);
+    let chart_h = analytics_height();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(keys_h)])
+        .constraints([
+            Constraint::Length(chart_h),
+            Constraint::Min(4),
+            Constraint::Length(keys_h),
+        ])
         .split(area);
-    let content = chunks[0];
-    let keys_area = chunks[1];
+
+    analytics::render_analytics(f, chunks[0], analytics);
+    let content = chunks[1];
+    let keys_area = chunks[2];
 
     if groups.is_empty() {
         let lines = vec![
@@ -33,7 +42,7 @@ pub fn render_triage(
             ratatui::text::Line::from(""),
             ratatui::text::Line::from("No unclassified senders. New mail lands here after sync."),
             ratatui::text::Line::from(""),
-            ratatui::text::Line::from("Press s to sync · x to classify against rules · A for AUTO."),
+            ratatui::text::Line::from("Press s to sync · x to classify · A for AUTO · . for chart period."),
         ];
         f.render_widget(
             ratatui::widgets::Paragraph::new(lines).block(panel_block("Triage")),
@@ -43,7 +52,11 @@ pub fn render_triage(
         return;
     }
 
-    let title = format!("Triage — {} senders · {} unclassified msgs", groups.len(), pending_msgs);
+    let title = format!(
+        "Triage — {} senders · {} unclassified msgs",
+        groups.len(),
+        pending_msgs
+    );
     let header = Row::new(vec![
         Cell::from("#"),
         Cell::from("Msgs"),
@@ -91,6 +104,9 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
     }
 }

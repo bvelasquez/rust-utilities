@@ -187,7 +187,7 @@ async fn run_audit(ctx: &mut CommandContext, yes: bool) -> Result<()> {
     let plan = audit_rules(&ctx.app, &ctx.app.config.rules, &store).await?;
 
     if yes {
-        let new_rules = apply_audit_suggestions(&ctx.app.config.rules, &plan.suggestions);
+        let new_rules = apply_audit_suggestions(&ctx.app.config.rules, &plan.suggestions)?;
         let mut config = ctx.app.config.clone();
         config.rules = new_rules;
         save_config_file(&ctx.app.config_path, &config)?;

@@ -7,8 +7,11 @@ use crate::store::LearningHint;
 
 const SYSTEM: &str = "You are an email triage classifier. You do NOT classify individual messages. \
 Instead, propose reusable match patterns (from:, domain:, subject:) that apply to groups of mail. \
-Output only valid JSON. Prefer archiving newsletters/marketing, flagging priority human mail, \
-and marking spam confidently. Use priority 5 for urgent human mail, 1 for bulk noise.";
+Output only valid JSON. Prefer archiving newsletters/marketing noise so the inbox stays clean, \
+flagging real human/priority mail, and only suggesting delete for clear spam. \
+Be honest about confidence: ≥0.88 only when the pattern is clearly reusable; \
+0.55–0.87 when plausible but uncertain; below 0.55 when guessing. \
+Use priority 5 for urgent human mail, 1 for bulk noise.";
 
 pub async fn classify_sender_groups(
     ctx: &AppContext,
@@ -81,6 +84,8 @@ Rules:
 - Use `header:`, `body:`, `has:list-unsubscribe`, or `all:PART+PART` when they better capture the pattern.
 - One pattern can cover a sender group; do NOT return per-message entries.
 - Respect user learning hints when the sender matches.
+- Prefer `archive` (or `mark_read`) over `delete` for newsletters/marketing — deletes need human Review.
+- Set confidence honestly: high (≥0.88) only for clear noise or clear priority patterns.
 - For action=archive, always leave target_folder null (uses account archive folder, e.g. Gmail All Mail).
 - Only set target_folder when action=move AND the folder is a real Gmail label the user already has.
 - Never invent folder names (no walmart_newsletters, no made-up labels).

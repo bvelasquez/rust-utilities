@@ -108,24 +108,43 @@ pub async fn fetch_new_messages(
     last_uid: u32,
     full: bool,
     preview_chars: usize,
+    initial_limit: usize,
+    full_limit: usize,
 ) -> Result<(Vec<(u32, ParsedMail, bool, bool)>, u32)> {
     let mut session = connect(account, password).await?;
     session.select(&account.inbox_folder).await?;
 
-    let query = if full || last_uid == 0 {
-        "ALL".to_string()
+    let mut uid_set: HashSet<u32> = HashSet::new();
+
+    if full || last_uid == 0 {
+        let uids = session.uid_search("ALL").await?;
+        let mut uid_list: Vec<u32> = uids.into_iter().collect();
+        uid_list.sort_unstable();
+        // First sync: small recent window. --full: larger backfill. Never the whole mailbox.
+        let limit = if full {
+            full_limit.max(1)
+        } else {
+            initial_limit.max(1)
+        };
+        let start = uid_list.len().saturating_sub(limit);
+        for u in &uid_list[start..] {
+            uid_set.insert(*u);
+        }
     } else {
-        format!("UID {}:*", last_uid.saturating_add(1))
-    };
+        // New mail since last sync
+        let new_uids = session
+            .uid_search(&format!("UID {}:*", last_uid.saturating_add(1)))
+            .await?;
+        uid_set.extend(new_uids);
 
-    let uids = session.uid_search(&query).await?;
-    let mut uid_list: Vec<u32> = uids.into_iter().collect();
-    uid_list.sort_unstable();
-
-    if full {
-        let start = uid_list.len().saturating_sub(500);
-        uid_list = uid_list[start..].to_vec();
+        // Also refresh any currently-unread messages (UIDs may already be cached).
+        // Without this, marking old mail unread in Gmail never updates the local cache.
+        let unseen = session.uid_search("UNSEEN").await?;
+        uid_set.extend(unseen);
     }
+
+    let mut uid_list: Vec<u32> = uid_set.into_iter().collect();
+    uid_list.sort_unstable();
 
     if uid_list.is_empty() {
         let _ = session.logout().await;
@@ -133,7 +152,9 @@ pub async fn fetch_new_messages(
     }
 
     let max_uid = *uid_list.iter().max().unwrap_or(&last_uid);
-    let uid_set = uid_list
+    // High-water mark only advances for truly new UIDs (not UNSEEN refreshes of old mail)
+    let high_water = max_uid.max(last_uid);
+    let uid_set_str = uid_list
         .iter()
         .map(|u| u.to_string())
         .collect::<Vec<_>>()
@@ -141,11 +162,15 @@ pub async fn fetch_new_messages(
 
     let mut out = Vec::new();
     {
-        let mut fetched = session.uid_fetch(&uid_set, "(UID FLAGS RFC822)").await?;
+        // BODY.PEEK[] — do NOT use RFC822/BODY[]; those implicitly set \Seen on Gmail.
+        let mut fetched = session
+            .uid_fetch(&uid_set_str, "(UID FLAGS BODY.PEEK[])")
+            .await?;
         while let Some(msg) = fetched.next().await {
             let msg = msg?;
             if let Some(parsed) = parse_fetch(msg, preview_chars) {
-                if parsed.0 > last_uid || full {
+                // Include: new UIDs, full sync, or UNSEEN refresh of already-seen UIDs
+                if parsed.0 > last_uid || full || parsed.2 {
                     out.push(parsed);
                 }
             }
@@ -153,7 +178,7 @@ pub async fn fetch_new_messages(
     }
 
     let _ = session.logout().await;
-    Ok((out, max_uid))
+    Ok((out, high_water))
 }
 
 fn parse_fetch(msg: Fetch, preview_chars: usize) -> Option<(u32, ParsedMail, bool, bool)> {

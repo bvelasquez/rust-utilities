@@ -55,7 +55,19 @@ pub async fn sync_all(
         };
 
         let state = store.get_sync_state(&account.id)?;
-        match imap::fetch_new_messages(account, &password, state.last_uid, full, preview).await {
+        let initial_limit = ctx.app.config.sync.initial_fetch_limit;
+        let full_limit = ctx.app.config.sync.full_fetch_limit;
+        match imap::fetch_new_messages(
+            account,
+            &password,
+            state.last_uid,
+            full,
+            preview,
+            initial_limit,
+            full_limit,
+        )
+        .await
+        {
             Ok((messages, max_uid)) => {
                 let fetched = messages.len();
                 let mut stored = 0usize;

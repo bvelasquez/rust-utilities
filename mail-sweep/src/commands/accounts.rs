@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::cli::AccountsCommands;
 use crate::commands::CommandContext;
-use crate::config::{gmail_account, save_config_file, AccountConfig};
+use crate::config::{gmail_account, icloud_account, save_config_file, AccountConfig};
 use crate::mail::imap;
 use crate::output::Envelope;
 
@@ -17,6 +17,7 @@ pub async fn run(ctx: &mut CommandContext, command: &AccountsCommands) -> Result
             smtp_host,
             smtp_port,
             gmail,
+            icloud,
             password,
         } => run_add(
             ctx,
@@ -27,6 +28,7 @@ pub async fn run(ctx: &mut CommandContext, command: &AccountsCommands) -> Result
             smtp_host,
             *smtp_port,
             *gmail,
+            *icloud,
             password.as_deref(),
         ),
         AccountsCommands::Test { id } => run_test(ctx, id).await,
@@ -86,8 +88,13 @@ fn run_add(
     smtp_host: &str,
     smtp_port: u16,
     gmail: bool,
+    icloud: bool,
     password: Option<&str>,
 ) -> Result<()> {
+    if gmail && icloud {
+        anyhow::bail!("use either --gmail or --icloud, not both");
+    }
+
     let mut config = ctx.app.config.clone();
     if config.accounts.iter().any(|a| a.id == id) {
         anyhow::bail!("account id '{id}' already exists");
@@ -95,6 +102,8 @@ fn run_add(
 
     let mut account = if gmail {
         gmail_account(id, email)
+    } else if icloud {
+        icloud_account(id, email)
     } else {
         AccountConfig {
             id: id.into(),
@@ -110,7 +119,7 @@ fn run_add(
         }
     };
 
-    if !gmail {
+    if !gmail && !icloud {
         account.imap_host = imap_host.into();
         account.imap_port = imap_port;
         account.smtp_host = smtp_host.into();
@@ -126,9 +135,23 @@ fn run_add(
     }
 
     if ctx.json {
-        Envelope::ok("accounts add", serde_json::json!({ "id": id, "email": email })).print_json()?;
+        Envelope::ok(
+            "accounts add",
+            serde_json::json!({
+                "id": id,
+                "email": email,
+                "provider": if gmail { "gmail" } else if icloud { "icloud" } else { "custom" },
+            }),
+        )
+        .print_json()?;
     } else {
         println!("Added account '{id}' ({email})");
+        if icloud {
+            println!(
+                "iCloud requires an app-specific password from https://appleid.apple.com \
+                 (Sign-In and Security → App-Specific Passwords)."
+            );
+        }
         if password.is_none() {
             println!("Set password: mail-sweep secrets set-account --id {id} --password <pass>");
         }

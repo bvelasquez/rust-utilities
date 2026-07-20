@@ -5,6 +5,9 @@ use crate::rules::patterns::{header_value, pattern_specificity, regex_match};
 use crate::store::CachedMessage;
 
 pub mod patterns;
+pub mod subsume;
+
+pub use subsume::{find_subsumed_rules, remove_rules_at, SubsumedRule};
 
 pub fn apply_rules_to_message(
     msg: &CachedMessage,

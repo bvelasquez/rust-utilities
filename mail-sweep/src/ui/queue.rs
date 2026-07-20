@@ -81,6 +81,7 @@ pub fn render_queue(
         Cell::from("Conf"),
         Cell::from("Action"),
         Cell::from("From"),
+        Cell::from("Subject"),
         Cell::from("Reason"),
     ])
     .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD));
@@ -98,8 +99,9 @@ pub fn render_queue(
                 Cell::from(format!("{:.0}%", conf * 100.0)).style(conf_style),
                 Cell::from(m.planned_action.clone().unwrap_or_default())
                     .style(Style::default().fg(WARN)),
-                Cell::from(truncate(&m.from_address, 22)),
-                Cell::from(truncate(m.plan_reason.as_deref().unwrap_or(""), 32)),
+                Cell::from(truncate(&m.from_address, 20)),
+                Cell::from(truncate(&m.subject, 28)),
+                Cell::from(truncate(m.plan_reason.as_deref().unwrap_or(""), 24)),
             ])
         })
         .collect();
@@ -111,8 +113,9 @@ pub fn render_queue(
         [
             Constraint::Length(6),
             Constraint::Length(10),
-            Constraint::Length(24),
-            Constraint::Min(16),
+            Constraint::Length(22),
+            Constraint::Length(30),
+            Constraint::Min(12),
         ],
     )
     .header(header)

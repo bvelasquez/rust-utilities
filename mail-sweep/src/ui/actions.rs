@@ -9,7 +9,7 @@ use crate::sync;
 pub async fn do_sync(ctx: &CommandContext) -> Result<String> {
     let report = sync::sync_all(ctx, None, false).await?;
     Ok(format!(
-        "Synced {} new/stored ({} fetched)",
+        "Synced {} new/stored ({} fetched) — UNSEEN refreshes re-open applied mail for Triage",
         report.total_stored, report.total_fetched
     ))
 }
@@ -38,18 +38,46 @@ pub async fn do_apply(
         on_progress,
     )
     .await?;
+    Ok(format_apply_summary(&summary))
+}
+
+/// AUTO path: only high-confidence safe actions; deletes/unsure stay in the plan for Review.
+pub async fn do_apply_auto(ctx: &CommandContext) -> Result<String> {
+    let min = ctx.app.config.safety.auto_apply_min_confidence;
+    let summary = apply::execute_apply_scoped(
+        ctx,
+        None,
+        false,
+        true,
+        false,
+        apply::ApplyScope::AutoSafe {
+            min_confidence: min,
+        },
+        None,
+    )
+    .await?;
+    if summary.applied == 0 && summary.failed == 0 && summary.aborted.is_none() {
+        return Ok(format!(
+            "no high-confidence safe actions (≥{:.0}%) — unsure/deletes wait in Review",
+            min * 100.0
+        ));
+    }
+    Ok(format_apply_summary(&summary))
+}
+
+fn format_apply_summary(summary: &apply::ApplySummary) -> String {
     let mut msg = format!(
         "Applied plan #{} — {} ok, {} failed",
         summary.plan_id, summary.applied, summary.failed
     );
     if summary.plan_closed {
         msg.push_str(" — plan closed");
-    } else if summary.failed > 0 || summary.aborted.is_some() {
-        msg.push_str(" — plan kept open for retry");
+    } else if summary.failed > 0 || summary.aborted.is_some() || summary.applied > 0 {
+        msg.push_str(" — plan kept open for retry/Review");
     }
     if let Some(err) = &summary.aborted {
         msg.push_str(&format!(" ({err})"));
     }
-    Ok(msg)
+    msg
 }
 

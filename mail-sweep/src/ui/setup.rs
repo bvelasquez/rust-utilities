@@ -30,7 +30,7 @@ pub fn render_setup(
         )
     } else {
         Span::styled(
-            "OFF — press A on any tab to enable hands-free triage",
+            "OFF — press A to enable (saved for next launch)",
             Style::default().fg(WARN),
         )
     };
@@ -44,8 +44,10 @@ pub fn render_setup(
         Line::from(""),
         Line::from(Span::styled("What AUTO does", Style::default().fg(AI))),
         Line::from("  1. Sync new/unread mail from Gmail"),
-        Line::from("  2. Match your rules + AI sender patterns"),
-        Line::from("  3. Apply safe actions (archive, mark read) — deletes stay in Review"),
+        Line::from("  2. Match rules + learning hints; AI patterns for the rest"),
+        Line::from("  3. High confidence (≥88%): save rule + apply archive/flag/keep"),
+        Line::from("  4. Medium: plan for Review · Low: category hint in Triage"),
+        Line::from("  5. Deletes never auto-apply — confirm in Review"),
         Line::from(""),
         Line::from(Span::styled(
             "Accounts",

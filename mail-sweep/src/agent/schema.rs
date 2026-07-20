@@ -88,6 +88,11 @@ impl MailAction {
     pub fn is_destructive(&self) -> bool {
         matches!(self, Self::Delete)
     }
+
+    /// Safe for AUTO apply (never deletes).
+    pub fn is_auto_safe(&self) -> bool {
+        !self.is_destructive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +110,13 @@ pub struct MessageDecision {
     pub tags: Vec<String>,
     pub confidence: f32,
     pub reason: String,
+}
+
+impl MessageDecision {
+    /// High-confidence safe action — AUTO may apply without Review.
+    pub fn is_auto_applicable(&self, min_confidence: f32) -> bool {
+        self.action.is_auto_safe() && self.confidence >= min_confidence
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

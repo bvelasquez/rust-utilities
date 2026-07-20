@@ -110,7 +110,7 @@ pub fn render_rule_audit(
         Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "j/k select · Space toggle · a apply accepted · Esc cancel",
+                "j/k select · Space toggle (none pre-selected) · a apply accepted · Esc cancel",
                 Style::default().fg(WARN),
             )),
         ]),
@@ -242,4 +242,89 @@ pub fn accepted_suggestions<'a>(
         .iter()
         .filter_map(|&i| plan.suggestions.get(i))
         .collect()
+}
+
+pub fn render_subsume_audit(
+    f: &mut Frame,
+    area: Rect,
+    keeper_pattern: &str,
+    candidates: &[crate::rules::SubsumedRule],
+    selected: usize,
+    accepted: &[usize],
+    list_state: &mut ListState,
+) {
+    f.render_widget(Clear, area);
+    let block = modal_block(" covered by broader rule — remove duplicates? ", ACCENT);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Keeper: ", Style::default().fg(MUTED)),
+                Span::styled(keeper_pattern, Style::default().fg(OK)),
+            ]),
+            Line::from(Span::styled(
+                format!(
+                    "{} same-action rule{} covered — Space toggle, a remove accepted",
+                    candidates.len(),
+                    if candidates.len() == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(MUTED),
+            )),
+            Line::from(""),
+        ]),
+        chunks[0],
+    );
+
+    if candidates.is_empty() {
+        f.render_widget(Paragraph::new("No covered duplicates found."), chunks[1]);
+    } else {
+        let items: Vec<ListItem> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let check = if accepted.contains(&i) { "✓" } else { " " };
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(format!("[{check}] "), Style::default().fg(OK)),
+                        Span::styled(format!("[{}] ", c.index), Style::default().fg(MUTED)),
+                        Span::raw(c.r#match.clone()),
+                        Span::styled(" → ", Style::default().fg(MUTED)),
+                        Span::styled(c.action.clone(), Style::default().fg(WARN)),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(c.reason.clone(), Style::default().fg(MUTED)),
+                    ]),
+                ])
+            })
+            .collect();
+
+        list_state.select(Some(selected.min(candidates.len().saturating_sub(1))));
+        let list = List::new(items)
+            .highlight_style(selected_row())
+            .highlight_symbol("▸ ");
+        StatefulWidget::render(list, chunks[1], f.buffer_mut(), list_state);
+    }
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "j/k · Space toggle · a remove selected · Esc keep all",
+                Style::default().fg(WARN),
+            )),
+        ]),
+        chunks[2],
+    );
 }

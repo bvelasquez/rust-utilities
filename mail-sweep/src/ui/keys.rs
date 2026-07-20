@@ -26,33 +26,55 @@ pub fn panel_key_rows(tab: Tab) -> Vec<Line<'static>> {
                 Span::styled("a", key_style()),
                 Span::styled(" apply plan  ", label_style()),
                 Span::styled("s", key_style()),
+                Span::styled(" sync  ", label_style()),
+                Span::styled(".", key_style()),
+                Span::styled(" chart day/week/month", label_style()),
+            ]),
+        ],
+        Tab::Review => vec![
+            Line::from(vec![
+                Span::styled("j/k", key_style()),
+                Span::styled(" select  ", label_style()),
+                Span::styled("z/g/i/o", key_style()),
+                Span::styled(" correct  ", label_style()),
+                Span::styled("Z/G/I/O", key_style()),
+                Span::styled(" sender  ", label_style()),
+                Span::styled("r", key_style()),
+                Span::styled(" reject → Triage", label_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("a", key_style()),
+                Span::styled(" apply full plan  ", label_style()),
+                Span::styled("s", key_style()),
                 Span::styled(" sync", label_style()),
             ]),
         ],
-        Tab::Review => vec![Line::from(vec![
-            Span::styled("j/k", key_style()),
-            Span::styled(" inspect  ", label_style()),
-            Span::styled("a", key_style()),
-            Span::styled(" apply full plan  ", label_style()),
-            Span::styled("s", key_style()),
-            Span::styled(" sync", label_style()),
-        ])],
-        Tab::Rules => vec![Line::from(vec![
-            Span::styled("j/k", key_style()),
-            Span::styled(" select  ", label_style()),
-            Span::styled("c", key_style()),
-            Span::styled(" category  ", label_style()),
-            Span::styled("e", key_style()),
-            Span::styled(" edit  ", label_style()),
-            Span::styled("t", key_style()),
-            Span::styled(" test  ", label_style()),
-            Span::styled("x", key_style()),
-            Span::styled(" audit  ", label_style()),
-            Span::styled("n", key_style()),
-            Span::styled(" preset  ", label_style()),
-            Span::styled("d", key_style()),
-            Span::styled(" delete", label_style()),
-        ])],
+        Tab::Rules => vec![
+            Line::from(vec![
+                Span::styled("j/k", key_style()),
+                Span::styled(" select  ", label_style()),
+                Span::styled("d", key_style()),
+                Span::styled(" delete rule  ", label_style()),
+                Span::styled("z/g/i/o", key_style()),
+                Span::styled(" filter  ", label_style()),
+                Span::styled("0", key_style()),
+                Span::styled(" all", label_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("c", key_style()),
+                Span::styled(" category  ", label_style()),
+                Span::styled("e", key_style()),
+                Span::styled(" edit  ", label_style()),
+                Span::styled("x", key_style()),
+                Span::styled(" covered  ", label_style()),
+                Span::styled("X", key_style()),
+                Span::styled(" AI audit  ", label_style()),
+                Span::styled("t", key_style()),
+                Span::styled(" test  ", label_style()),
+                Span::styled("n", key_style()),
+                Span::styled(" preset", label_style()),
+            ]),
+        ],
         Tab::Setup => vec![Line::from(vec![
             Span::styled("A", key_style()),
             Span::styled(" toggle AUTO  ", label_style()),
@@ -63,7 +85,13 @@ pub fn panel_key_rows(tab: Tab) -> Vec<Line<'static>> {
 }
 
 pub fn panel_keys_height(tab: Tab) -> u16 {
-    panel_key_rows(tab).len() as u16
+    let rows = panel_key_rows(tab).len() as u16;
+    if rows == 0 {
+        0
+    } else {
+        // footer_block uses Borders::TOP — reserve one extra row so all key lines fit.
+        rows + 1
+    }
 }
 
 pub fn render_panel_keys(area: ratatui::layout::Rect, f: &mut ratatui::Frame, tab: Tab) {
@@ -93,8 +121,8 @@ pub fn render_panel_keys(area: ratatui::layout::Rect, f: &mut ratatui::Frame, ta
 /// Footer rows below the status line (tab keys + global keys).
 pub fn footer_key_row_count(tab: Tab) -> usize {
     match tab {
-        Tab::Triage | Tab::Rules => 2,
-        Tab::Review | Tab::Setup => 1,
+        Tab::Triage | Tab::Rules | Tab::Review => 2,
+        Tab::Setup => 1,
     }
 }
 
@@ -137,22 +165,31 @@ pub fn keys_for_footer(tab: Tab, row: u8) -> Line<'static> {
         Tab::Review => match row {
             0 => Line::from(vec![
                 Span::styled("Review", Style::default().fg(MUTED)),
-                Span::styled(
-                    " — deletes + low-confidence only · empty can still mean plan ready · ",
-                    label_style(),
-                ),
+                Span::styled(" — ", label_style()),
+                Span::styled("z/g/i/o", key_style()),
+                Span::styled(" correct (saves rule) · ", label_style()),
+                Span::styled("r", key_style()),
+                Span::styled(" reject · ", label_style()),
                 Span::styled("a", key_style()),
-                Span::styled(" applies entire pending plan", label_style()),
+                Span::styled(" apply plan", label_style()),
             ]),
             _ => global,
         },
         Tab::Rules => match row {
             0 => Line::from(vec![
                 Span::styled("Rules", Style::default().fg(MUTED)),
-                Span::styled(" — grouped by category · ", label_style()),
+                Span::styled(" — ", label_style()),
+                Span::styled("d", key_style()),
+                Span::styled(" delete · ", label_style()),
+                Span::styled("z/g/i/o", key_style()),
+                Span::styled(" filter · ", label_style()),
+                Span::styled("0", key_style()),
+                Span::styled(" all · ", label_style()),
                 Span::styled("c", key_style()),
-                Span::styled(" recategorize · ", label_style()),
+                Span::styled(" category · ", label_style()),
                 Span::styled("x", key_style()),
+                Span::styled(" covered · ", label_style()),
+                Span::styled("X", key_style()),
                 Span::styled(" AI audit", label_style()),
             ]),
             _ => global,

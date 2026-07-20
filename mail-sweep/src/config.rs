@@ -21,6 +21,12 @@ pub struct SyncConfig {
     pub batch_size: usize,
     #[serde(default = "default_body_preview")]
     pub body_preview_chars: usize,
+    /// Max messages to pull on a brand-new account (last_uid == 0). Recent UIDs only.
+    #[serde(default = "default_initial_fetch_limit")]
+    pub initial_fetch_limit: usize,
+    /// Max messages when using `sync --full` / backfill.
+    #[serde(default = "default_full_fetch_limit")]
+    pub full_fetch_limit: usize,
     #[serde(default)]
     pub auto_process: bool,
 }
@@ -31,6 +37,8 @@ impl Default for SyncConfig {
             poll_interval: default_poll_interval(),
             batch_size: default_batch_size(),
             body_preview_chars: default_body_preview(),
+            initial_fetch_limit: default_initial_fetch_limit(),
+            full_fetch_limit: default_full_fetch_limit(),
             auto_process: false,
         }
     }
@@ -48,12 +56,29 @@ fn default_body_preview() -> usize {
     500
 }
 
+fn default_initial_fetch_limit() -> usize {
+    50
+}
+
+fn default_full_fetch_limit() -> usize {
+    500
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyConfig {
     #[serde(default)]
     pub allow_delete: bool,
+    /// Planned messages below this confidence appear in Review (legacy name; usually
+    /// matches `auto_apply_min_confidence`).
     #[serde(default = "default_review_threshold")]
     pub require_review_above: f32,
+    /// AUTO applies only safe actions (archive/flag/keep/…) at or above this score.
+    /// Also the floor for saving LLM patterns as durable rules.
+    #[serde(default = "default_auto_apply_confidence")]
+    pub auto_apply_min_confidence: f32,
+    /// LLM suggestions below this are category-only (stay in Triage); at/above are planned.
+    #[serde(default = "default_plan_min_confidence")]
+    pub plan_min_confidence: f32,
 }
 
 impl Default for SafetyConfig {
@@ -61,12 +86,29 @@ impl Default for SafetyConfig {
         Self {
             allow_delete: false,
             require_review_above: default_review_threshold(),
+            auto_apply_min_confidence: default_auto_apply_confidence(),
+            plan_min_confidence: default_plan_min_confidence(),
         }
     }
 }
 
+impl SafetyConfig {
+    /// Review shows planned mail AUTO will not apply (below auto-apply confidence).
+    pub fn review_threshold(&self) -> f32 {
+        self.auto_apply_min_confidence.clamp(0.0, 1.0)
+    }
+}
+
 fn default_review_threshold() -> f32 {
-    0.85
+    0.88
+}
+
+fn default_auto_apply_confidence() -> f32 {
+    0.88
+}
+
+fn default_plan_min_confidence() -> f32 {
+    0.55
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,5 +402,21 @@ pub fn gmail_account(id: &str, email: &str) -> AccountConfig {
         inbox_folder: "INBOX".into(),
         archive_folder: "[Gmail]/All Mail".into(),
         spam_folder: "[Gmail]/Spam".into(),
+    }
+}
+
+/// iCloud Mail (Apple) — requires an app-specific password from appleid.apple.com.
+pub fn icloud_account(id: &str, email: &str) -> AccountConfig {
+    AccountConfig {
+        id: id.into(),
+        email: email.into(),
+        imap_host: "imap.mail.me.com".into(),
+        imap_port: 993,
+        smtp_host: "smtp.mail.me.com".into(),
+        smtp_port: 587,
+        password: None,
+        inbox_folder: "INBOX".into(),
+        archive_folder: "Archive".into(),
+        spam_folder: "Junk".into(),
     }
 }

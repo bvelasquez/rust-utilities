@@ -45,6 +45,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "IMAP reads/syncs; SMTP sends. Both configured per account.",
             "Mutations require `--yes` or `--dry-run` when stdout is not a TTY",
             "Deletes require `safety.allow_delete = true` or `--allow-delete`",
+            "AUTO applies only safe actions at safety.auto_apply_min_confidence (default 0.88) and saves those LLM patterns as rules",
             "Rule patterns: subject:/from:/domain:/header:/body:/has:list-unsubscribe/all:A+B",
             "Run `mail-sweep rules audit --json` to review AI merge suggestions before `--yes`"
         ]
@@ -60,7 +61,12 @@ pub fn config_schema_json() -> serde_json::Value {
                 "llm.model": "OpenRouter model override (non-secret)",
                 "sync.poll_interval": "Background sync interval",
                 "sync.batch_size": "Sender groups per AI pattern batch (not per-email)",
+                "sync.initial_fetch_limit": "Max recent messages on first sync of a new account (default 50)",
+                "sync.full_fetch_limit": "Max messages for sync --full backfill (default 500)",
                 "safety.allow_delete": "Allow IMAP delete actions",
+                "safety.auto_apply_min_confidence": "AUTO applies safe actions + saves rules at/above this (default 0.88)",
+                "safety.plan_min_confidence": "LLM suggestions below this stay as Triage category hints (default 0.55)",
+                "safety.require_review_above": "Legacy Review threshold; effective Review uses min with auto_apply",
                 "accounts": "Multi-account IMAP/SMTP settings (hosts, email, folders)"
             }
         },
@@ -90,7 +96,8 @@ pub fn config_schema_json() -> serde_json::Value {
             "mail-sweep secrets set-openrouter-key --key <key>",
             "mail-sweep secrets set-llm-model --model <model>",
             "mail-sweep secrets set-account --id <id> --password <pass>",
-            "mail-sweep accounts add --id <id> --email <email> --password <pass> --gmail"
+            "mail-sweep accounts add --id <id> --email <email> --password <pass> --gmail",
+            "mail-sweep accounts add --id <id> --email <email> --icloud  # iCloud needs app-specific password",
         ]
     })
 }

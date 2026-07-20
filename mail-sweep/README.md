@@ -15,11 +15,13 @@ Configure accounts and secrets (no exported env vars required):
 
 ```bash
 mail-sweep accounts add --id personal --email you@gmail.com --gmail
+mail-sweep accounts add --id icloud --email you@icloud.com --icloud
 mail-sweep secrets set-openrouter-key --key sk-or-v1-...
 mail-sweep secrets set-account --id personal --password 'your-app-password'
 mail-sweep accounts test personal --json
 ```
 
+**iCloud:** use `--icloud` and an [app-specific password](https://appleid.apple.com) (Sign-In and Security → App-Specific Passwords). Your Apple ID password will not work.
 Or copy [`.env.example`](.env.example) to `.env` in your project or `~/.config/mail-sweep/.env`:
 
 ```env
@@ -71,9 +73,13 @@ model = "openai/gpt-4o-mini"
 [sync]
 poll_interval = "5m"
 batch_size = 25
+initial_fetch_limit = 50
+full_fetch_limit = 500
 
 [safety]
 allow_delete = false
+auto_apply_min_confidence = 0.88
+plan_min_confidence = 0.55
 
 [[accounts]]
 id = "personal"

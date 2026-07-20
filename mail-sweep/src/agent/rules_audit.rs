@@ -10,7 +10,9 @@ use crate::store::Store;
 const SYSTEM: &str = "You are an email rules auditor. Review existing triage rules and suggest \
 consolidations, generalizations, and gap-filling patterns. Output only valid JSON. Never invent \
 senders not present in the samples. Prefer broader domain/subject/header patterns over many \
-narrow from: rules when action and category agree.";
+narrow from: rules when action and category agree. CRITICAL: Never propose retiring more than \
+15 rules in one suggestion. Prefer small merges (2–10 similar from: rules → one domain: rule). \
+Do not wipe the whole ruleset.";
 
 pub fn build_audit_inputs(rules: &[RuleConfig], store: &Store) -> Result<Vec<RuleAuditInput>> {
     let mut inputs = Vec::new();
@@ -145,10 +147,12 @@ Return JSON:
 Rules:
 - merge/replace: retire_indices lists rule indexes to remove; proposed_rules are replacements
 - add: new rules with empty retire_indices
-- remove: retire_indices only, empty proposed_rules
+- remove: retire_indices only, empty proposed_rules — max 5 indices per remove suggestion
+- merge/replace: max 15 retire_indices per suggestion; always include proposed_rules
 - conflict: highlight contradictory rules, do not auto-resolve
 - Prefer domain: or subject: regex over many from: rules with same action
 - Do NOT use OR compounds (not supported)
+- Do NOT propose retiring a majority of the ruleset in one plan
 
 Current rules with coverage samples:
 {rules_json}
@@ -187,19 +191,24 @@ struct LlmProposedRule {
 }
 
 /// Apply accepted audit suggestions to a rules vec (returns new rules list).
+///
+/// Refuses mass wipes: retiring more than half the ruleset with no replacements,
+/// or retiring every rule.
 pub fn apply_audit_suggestions(
     rules: &[RuleConfig],
     suggestions: &[RuleAuditSuggestion],
-) -> Vec<RuleConfig> {
-    let mut out = rules.to_vec();
+) -> Result<Vec<RuleConfig>> {
     let mut to_retire: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut to_add: Vec<RuleConfig> = Vec::new();
 
     for suggestion in suggestions {
         for &idx in &suggestion.retire_indices {
-            to_retire.insert(idx);
+            if idx < rules.len() {
+                to_retire.insert(idx);
+            }
         }
         for proposed in &suggestion.proposed_rules {
-            out.push(RuleConfig {
+            to_add.push(RuleConfig {
                 id: None,
                 r#match: proposed.r#match.clone(),
                 category: proposed.category.clone(),
@@ -210,16 +219,47 @@ pub fn apply_audit_suggestions(
         }
     }
 
-    let mut final_rules: Vec<RuleConfig> = out
-        .into_iter()
+    if rules.is_empty() {
+        return Ok(to_add);
+    }
+
+    let retire_n = to_retire.len();
+    if retire_n == rules.len() && to_add.is_empty() {
+        anyhow::bail!(
+            "refusing to delete all {} rules with no replacements — re-run audit and accept smaller merges",
+            rules.len()
+        );
+    }
+    if retire_n * 2 > rules.len() && to_add.is_empty() {
+        anyhow::bail!(
+            "refusing to remove {retire_n}/{} rules with no replacements — select fewer suggestions",
+            rules.len()
+        );
+    }
+    if retire_n > 40 && to_add.len() < 3 {
+        anyhow::bail!(
+            "refusing large retire ({retire_n} rules, {} replacements) — accept smaller merges",
+            to_add.len()
+        );
+    }
+
+    let mut final_rules: Vec<RuleConfig> = rules
+        .iter()
         .enumerate()
-        .filter_map(|(i, r)| if to_retire.contains(&i) { None } else { Some(r) })
+        .filter_map(|(i, r)| {
+            if to_retire.contains(&i) {
+                None
+            } else {
+                Some(r.clone())
+            }
+        })
         .collect();
+    final_rules.extend(to_add);
 
     // Deduplicate by match string (keep first)
     let mut seen = std::collections::HashSet::new();
     final_rules.retain(|r| seen.insert(r.r#match.clone()));
-    final_rules
+    Ok(final_rules)
 }
 
 /// Preview how many messages a proposed rule would match.
@@ -273,8 +313,31 @@ mod tests {
             retire_indices: vec![0, 1],
             example_subjects: vec![],
         }];
-        let merged = apply_audit_suggestions(&rules, &suggestions);
+        let merged = apply_audit_suggestions(&rules, &suggestions).unwrap();
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].r#match, "domain:x.com");
+    }
+
+    #[test]
+    fn apply_refuses_mass_wipe_without_replacements() {
+        let rules: Vec<_> = (0..10)
+            .map(|i| RuleConfig {
+                id: None,
+                r#match: format!("from:a{i}@x.com"),
+                category: None,
+                action: "archive".into(),
+                priority: None,
+                target_folder: None,
+            })
+            .collect();
+        let suggestions = vec![RuleAuditSuggestion {
+            kind: "remove".into(),
+            confidence: 1.0,
+            reason: "wipe".into(),
+            proposed_rules: vec![],
+            retire_indices: (0..10).collect(),
+            example_subjects: vec![],
+        }];
+        assert!(apply_audit_suggestions(&rules, &suggestions).is_err());
     }
 }

@@ -1,16 +1,25 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::rules::patterns::{validation_detail, validation_status};
 use super::theme::{modal_block, ACCENT, ERR, MUTED, OK, WARN};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PatternEditFocus {
+    #[default]
+    Pattern,
+    Desc,
+}
+
 pub fn render_pattern_editor(
     f: &mut Frame,
     area: Rect,
     buffer: &str,
+    desc: &str,
+    focus: PatternEditFocus,
     title: &str,
     match_count: Option<usize>,
 ) {
@@ -28,19 +37,37 @@ pub fn render_pattern_editor(
         Style::default().fg(MUTED)
     };
 
+    let pattern_focused = focus == PatternEditFocus::Pattern;
+    let desc_focused = focus == PatternEditFocus::Desc;
+
     let mut lines = vec![
         Line::from(Span::styled(
-            "Edit match pattern, then Enter:",
+            "Pattern (Tab → description · F5 generate · Enter on pattern → action):",
             Style::default().fg(MUTED),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  ", Style::default()),
             Span::styled(
-                buffer,
-                Style::default().fg(OK).add_modifier(Modifier::BOLD),
+                if pattern_focused { "▸ " } else { "  " },
+                Style::default().fg(ACCENT),
             ),
-            Span::styled("▌", Style::default().fg(ACCENT)),
+            Span::styled(
+                if buffer.is_empty() && !pattern_focused {
+                    "(empty)".into()
+                } else {
+                    buffer.to_string()
+                },
+                if pattern_focused {
+                    Style::default().fg(OK).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(MUTED)
+                },
+            ),
+            if pattern_focused {
+                Span::styled("▌", Style::default().fg(ACCENT))
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
             Span::styled("  ", Style::default()),
@@ -62,6 +89,55 @@ pub fn render_pattern_editor(
         ]));
     }
 
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            if desc_focused { "▸ " } else { "  " },
+            Style::default().fg(ACCENT),
+        ),
+        Span::styled(
+            "Describe match for AI",
+            if desc_focused {
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            },
+        ),
+        Span::styled(" (multiline):", Style::default().fg(MUTED)),
+    ]));
+
+    if desc.is_empty() && !desc_focused {
+        lines.push(Line::from(Span::styled(
+            "    e.g. invoices from Stripe mentioning \"paid\" in the subject",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for (i, row) in desc.split('\n').enumerate() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    row.to_string(),
+                    if desc_focused {
+                        Style::default().fg(OK)
+                    } else {
+                        Style::default().fg(MUTED)
+                    },
+                ),
+                if desc_focused && i + 1 == desc.split('\n').count() {
+                    Span::styled("▌", Style::default().fg(ACCENT))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+        }
+        if desc_focused && desc.ends_with('\n') {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled("▌", Style::default().fg(ACCENT)),
+            ]));
+        }
+    }
+
     lines.extend([
         Line::from(""),
         Line::from(Span::styled(
@@ -69,16 +145,12 @@ pub fn render_pattern_editor(
             Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
-            "all:domain:x.com+subject:y  (compound AND)",
-            Style::default().fg(MUTED),
-        )),
-        Line::from(Span::styled(
-            "Enter → pick action · Esc cancel",
+            "Tab focus · F5 AI fill pattern · Enter = newline in description · Enter on pattern → action",
             Style::default().fg(WARN),
         )),
     ]);
 
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 pub fn render_pattern_action_picker(

@@ -85,6 +85,35 @@ pub async fn execute_apply(
     dry_run: bool,
     yes: bool,
     allow_delete: bool,
+    on_progress: Option<&mut dyn FnMut(&ApplySnapshot)>,
+) -> Result<ApplySummary> {
+    execute_apply_scoped(
+        ctx,
+        plan_id,
+        dry_run,
+        yes,
+        allow_delete,
+        ApplyScope::All,
+        on_progress,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ApplyScope {
+    /// Apply every decision in the plan (manual `a` / CLI).
+    All,
+    /// AUTO: only high-confidence safe actions; leave deletes + unsure in the plan.
+    AutoSafe { min_confidence: f32 },
+}
+
+pub async fn execute_apply_scoped(
+    ctx: &CommandContext,
+    plan_id: Option<i64>,
+    dry_run: bool,
+    yes: bool,
+    allow_delete: bool,
+    scope: ApplyScope,
     mut on_progress: Option<&mut dyn FnMut(&ApplySnapshot)>,
 ) -> Result<ApplySummary> {
     let mut emit = |progress: &ApplyProgress| {
@@ -107,11 +136,32 @@ pub async fn execute_apply(
     let plan: ClassificationPlan =
         serde_json::from_str(&stored.json_plan).context("parse stored plan")?;
 
-    let total = plan.messages.len();
+    let scoped: Vec<_> = match scope {
+        ApplyScope::All => plan.messages.clone(),
+        ApplyScope::AutoSafe { min_confidence } => plan
+            .messages
+            .iter()
+            .filter(|m| m.is_auto_applicable(min_confidence))
+            .cloned()
+            .collect(),
+    };
+
+    if scoped.is_empty() {
+        return Ok(ApplySummary {
+            plan_id: stored.id,
+            applied: 0,
+            failed: 0,
+            results: vec![],
+            plan_closed: false,
+            aborted: None,
+        });
+    }
+
+    let total = scoped.len();
     let mut progress = ApplyProgress::new(stored.id, total);
     emit(&progress);
 
-    let has_delete = plan.messages.iter().any(|m| m.action.is_destructive());
+    let has_delete = scoped.iter().any(|m| m.action.is_destructive());
     let allow_delete = allow_delete || ctx.app.config.safety.allow_delete;
 
     if has_delete && !allow_delete && !dry_run {
@@ -135,8 +185,7 @@ pub async fn execute_apply(
     let mut aborted: Option<String> = None;
 
     for account in &ctx.app.config.accounts {
-        let account_decisions: Vec<_> = plan
-            .messages
+        let account_decisions: Vec<_> = scoped
             .iter()
             .filter(|m| m.account_id == account.id)
             .cloned()
@@ -208,6 +257,7 @@ pub async fn execute_apply(
     };
     let failed = total.saturating_sub(applied);
 
+    // Finalize against the full plan so unscoped (delete / low-conf) rows stay queued.
     let plan_closed = if dry_run {
         false
     } else {

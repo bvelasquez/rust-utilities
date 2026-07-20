@@ -57,6 +57,78 @@ pub struct DailyStat {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum AnalyticsPeriod {
+    #[default]
+    Day,
+    Week,
+    Month,
+}
+
+impl AnalyticsPeriod {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Day => Self::Week,
+            Self::Week => Self::Month,
+            Self::Month => Self::Day,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Day => "last 14 days",
+            Self::Week => "last 8 weeks",
+            Self::Month => "last 6 months",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ActionCounts {
+    pub delete: i64,
+    pub archive: i64,
+    pub flag: i64,
+    pub keep: i64,
+    pub other: i64,
+}
+
+impl ActionCounts {
+    pub fn add(&mut self, action: &str, n: i64) {
+        match action {
+            "delete" => self.delete += n,
+            "archive" => self.archive += n,
+            "flag" => self.flag += n,
+            "keep" => self.keep += n,
+            _ => self.other += n,
+        }
+    }
+
+    pub fn total(&self) -> i64 {
+        self.delete + self.archive + self.flag + self.keep + self.other
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TimeBucket {
+    pub label: String,
+    pub counts: ActionCounts,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedAnalytics {
+    pub period: AnalyticsPeriod,
+    pub buckets: Vec<TimeBucket>,
+    pub totals: ActionCounts,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingSenderGroup {
     pub from_address: String,
@@ -163,6 +235,30 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_learning_sender ON learning(sender);",
         )?;
+        self.ensure_column("messages", "applied_at", "TEXT")?;
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_messages_applied_at ON messages(applied_at);
+             UPDATE messages
+                SET applied_at = COALESCE(date, datetime('now'))
+              WHERE status = 'applied' AND applied_at IS NULL;",
+        )?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, decl: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == column);
+        if !exists {
+            self.conn
+                .execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+                    [],
+                )
+                .with_context(|| format!("add column {table}.{column}"))?;
+        }
         Ok(())
     }
 
@@ -191,7 +287,24 @@ impl Store {
                 body_preview = excluded.body_preview,
                 body_text = excluded.body_text,
                 list_unsubscribe = excluded.list_unsubscribe,
-                raw_headers_json = excluded.raw_headers_json",
+                raw_headers_json = excluded.raw_headers_json,
+                -- Re-open applied mail for triage when the user marks it unread in Gmail.
+                status = CASE
+                    WHEN excluded.is_unread = 1 AND messages.status = 'applied' THEN 'pending'
+                    ELSE messages.status
+                END,
+                planned_action = CASE
+                    WHEN excluded.is_unread = 1 AND messages.status = 'applied' THEN NULL
+                    ELSE messages.planned_action
+                END,
+                plan_confidence = CASE
+                    WHEN excluded.is_unread = 1 AND messages.status = 'applied' THEN NULL
+                    ELSE messages.plan_confidence
+                END,
+                plan_reason = CASE
+                    WHEN excluded.is_unread = 1 AND messages.status = 'applied' THEN NULL
+                    ELSE messages.plan_reason
+                END",
             params![
                 account_id,
                 uid,
@@ -399,6 +512,28 @@ impl Store {
                     d.action.as_str(),
                     d.confidence,
                     d.reason,
+                    d.account_id,
+                    d.uid,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Soft LLM hint: set category/priority without planning an IMAP action (stays in Triage).
+    pub fn apply_category_hints(
+        &self,
+        decisions: &[crate::agent::schema::MessageDecision],
+    ) -> Result<()> {
+        for d in decisions {
+            self.conn.execute(
+                "UPDATE messages SET category = ?1, priority = ?2,
+                 plan_reason = ?3
+                 WHERE account_id = ?4 AND uid = ?5 AND status = 'pending'",
+                params![
+                    d.category.as_str(),
+                    d.priority,
+                    format!("llm hint ({:.0}%): {}", d.confidence * 100.0, d.reason),
                     d.account_id,
                     d.uid,
                 ],
@@ -631,14 +766,99 @@ impl Store {
         Ok(())
     }
 
+    /// Drop one planned message from the open plan and return it to Triage (`pending`).
+    pub fn reject_from_plan(&self, account_id: &str, uid: u32) -> Result<bool> {
+        self.clear_message_plan(account_id, uid)?;
+        let Some(stored) = self.latest_pending_plan()? else {
+            return Ok(true);
+        };
+        let mut plan: crate::agent::schema::ClassificationPlan =
+            serde_json::from_str(&stored.json_plan).context("parse plan for reject")?;
+        let before = plan.messages.len();
+        plan.messages
+            .retain(|m| !(m.account_id == account_id && m.uid == uid));
+        if plan.messages.len() == before {
+            return Ok(true);
+        }
+        if plan.messages.is_empty() {
+            self.mark_plan_applied(stored.id)?;
+        } else {
+            plan.summary = format!(
+                "{} message{} still pending apply",
+                plan.messages.len(),
+                if plan.messages.len() == 1 { "" } else { "s" }
+            );
+            self.replace_plan_messages(stored.id, &plan)?;
+        }
+        Ok(true)
+    }
+
     pub fn mark_messages_applied(&self, account_id: &str, uids: &[u32]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
         for uid in uids {
             self.conn.execute(
-                "UPDATE messages SET status = 'applied' WHERE account_id = ?1 AND uid = ?2",
-                params![account_id, uid],
+                "UPDATE messages SET status = 'applied', applied_at = COALESCE(applied_at, ?3)
+                 WHERE account_id = ?1 AND uid = ?2",
+                params![account_id, uid, now],
             )?;
         }
         Ok(())
+    }
+
+    /// Applied-mail volume over time + breakdown by planned action (archive/flag/keep/delete).
+    pub fn applied_analytics(&self, period: AnalyticsPeriod) -> Result<AppliedAnalytics> {
+        let (bucket_expr, lookback, max_buckets) = match period {
+            AnalyticsPeriod::Day => ("date(applied_at)", "-14 days", 14usize),
+            AnalyticsPeriod::Week => ("strftime('%Y-W%W', applied_at)", "-56 days", 8usize),
+            AnalyticsPeriod::Month => ("strftime('%Y-%m', applied_at)", "-180 days", 6usize),
+        };
+
+        let sql = format!(
+            "SELECT {bucket_expr} AS bucket,
+                    COALESCE(planned_action, 'other') AS action,
+                    COUNT(*) AS n
+             FROM messages
+             WHERE status = 'applied'
+               AND applied_at IS NOT NULL
+               AND applied_at >= datetime('now', '{lookback}')
+             GROUP BY bucket, action
+             ORDER BY bucket ASC"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        let mut by_bucket: std::collections::BTreeMap<String, ActionCounts> =
+            std::collections::BTreeMap::new();
+        let mut totals = ActionCounts::default();
+
+        for row in rows {
+            let (bucket, action, n) = row?;
+            let entry = by_bucket.entry(bucket).or_default();
+            entry.add(&action, n);
+            totals.add(&action, n);
+        }
+
+        // Keep the most recent max_buckets labels (fill empties only for day period).
+        let mut buckets: Vec<TimeBucket> = by_bucket
+            .into_iter()
+            .map(|(label, counts)| TimeBucket { label, counts })
+            .collect();
+        if buckets.len() > max_buckets {
+            buckets = buckets.split_off(buckets.len() - max_buckets);
+        }
+
+        Ok(AppliedAnalytics {
+            period,
+            buckets,
+            totals,
+        })
     }
 
     pub fn category_stats(&self, account_id: Option<&str>, days: i64) -> Result<Vec<CategoryStat>> {
@@ -1207,5 +1427,30 @@ mod tests {
         assert_eq!(remaining.messages[0].account_id, "b");
         assert_eq!(store.message_status("a", 1).unwrap(), "applied");
         assert_eq!(store.message_status("b", 2).unwrap(), "planned");
+    }
+
+    #[test]
+    fn reject_from_plan_returns_message_to_pending() {
+        let (_dir, store) = test_store();
+        store.seed_pending_message("personal", 1, "a@x.com").unwrap();
+        store.seed_pending_message("personal", 2, "b@x.com").unwrap();
+        let plan = ClassificationPlan {
+            messages: vec![
+                decision("personal", 1, "delete", 0.4),
+                decision("personal", 2, "archive", 0.5),
+            ],
+            summary: "two".into(),
+        };
+        store.apply_decisions(&plan.messages).unwrap();
+        store.save_plan(&plan).unwrap();
+
+        assert!(store.reject_from_plan("personal", 1).unwrap());
+        assert_eq!(store.message_status("personal", 1).unwrap(), "pending");
+        assert_eq!(store.message_status("personal", 2).unwrap(), "planned");
+        assert_eq!(store.pending_plan_message_count().unwrap(), 1);
+
+        assert!(store.reject_from_plan("personal", 2).unwrap());
+        assert_eq!(store.message_status("personal", 2).unwrap(), "pending");
+        assert!(store.latest_pending_plan().unwrap().is_none());
     }
 }

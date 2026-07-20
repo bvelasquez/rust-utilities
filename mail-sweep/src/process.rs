@@ -2,9 +2,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::agent::classify::classify_sender_groups;
-use crate::agent::schema::{ClassificationPlan, MessageDecision};
+use crate::agent::schema::{ClassificationPlan, MailAction, MessageDecision};
 use crate::commands::CommandContext;
-use crate::config::{save_config_file, RuleConfig};
+use crate::config::{save_config_file, RuleConfig, SafetyConfig};
 use crate::process::grouping::{
     decision_from_hint, decision_from_teaching, expand_patterns, group_by_sender, hint_for_sender,
     sender_group_input,
@@ -16,7 +16,36 @@ use crate::store::{CachedMessage, Store};
 
 pub mod grouping;
 
-const AUTO_SAVE_PATTERN_CONFIDENCE: f32 = 0.88;
+/// Split LLM decisions into plan-worthy vs category-only hints.
+pub fn tier_llm_decisions(
+    decisions: Vec<MessageDecision>,
+    safety: &SafetyConfig,
+) -> (Vec<MessageDecision>, Vec<MessageDecision>) {
+    let plan_min = safety.plan_min_confidence.clamp(0.0, 1.0);
+    let mut to_plan = Vec::new();
+    let mut hints = Vec::new();
+    for d in decisions {
+        // Deletes always plan into Review; never soft-hint only.
+        if d.action.is_destructive() || d.confidence >= plan_min {
+            to_plan.push(d);
+        } else {
+            hints.push(d);
+        }
+    }
+    (to_plan, hints)
+}
+
+/// Patterns durable enough to save as rules (never auto-save deletes).
+pub fn pattern_eligible_for_rule_save(
+    confidence: f32,
+    action: &str,
+    min_confidence: f32,
+) -> bool {
+    if MailAction::parse(action).is_destructive() {
+        return false;
+    }
+    confidence >= min_confidence
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessReport {
@@ -79,35 +108,49 @@ pub async fn process_pending(
     let llm_sender_count = llm_batches.len();
 
     let mut llm_decisions = Vec::new();
+    let mut llm_hints = Vec::new();
     let mut patterns_proposed = 0usize;
     let mut summary = String::new();
+    let mut rules_saved = 0usize;
 
     if !llm_batches.is_empty() {
         let inputs: Vec<_> = llm_batches.iter().map(sender_group_input).collect();
         let plan = classify_sender_groups(&ctx.app, &inputs, &hints).await?;
         patterns_proposed = plan.patterns.len();
         summary = plan.summary.clone();
-        llm_decisions = expand_patterns(&plan.patterns, &llm_batches);
+        let expanded = expand_patterns(&plan.patterns, &llm_batches);
+        let (planned, soft) = tier_llm_decisions(expanded, &ctx.app.config.safety);
+        llm_decisions = planned;
+        llm_hints = soft;
 
         if !dry_run {
-            maybe_save_patterns(ctx, &plan.patterns)?;
+            rules_saved = maybe_save_patterns(ctx, &plan.patterns)?;
+            if !llm_hints.is_empty() {
+                store.apply_category_hints(&llm_hints)?;
+            }
         }
     }
 
     if summary.is_empty() {
         summary = format!(
-            "{} msgs via rules, {} via your feedback, {} senders → {} patterns ({} msgs)",
+            "{} msgs via rules, {} via your feedback, {} senders → {} patterns ({} planned, {} soft hints)",
             rule_decisions.len(),
             feedback_decisions.len(),
             llm_sender_count,
             patterns_proposed,
-            llm_decisions.len()
+            llm_decisions.len(),
+            llm_hints.len()
+        );
+    } else if rules_saved > 0 || !llm_hints.is_empty() {
+        summary = format!(
+            "{summary} · saved {rules_saved} rules · {} soft category hints",
+            llm_hints.len()
         );
     }
 
     let rule_count = rule_decisions.len();
     let feedback_count = feedback_decisions.len();
-    let llm_msg_count = llm_decisions.len();
+    let llm_msg_count = llm_decisions.len() + llm_hints.len();
 
     let mut all_decisions = rule_decisions;
     all_decisions.append(&mut feedback_decisions);
@@ -330,12 +373,13 @@ fn ensure_rule(
 fn maybe_save_patterns(
     ctx: &mut CommandContext,
     patterns: &[crate::agent::schema::ClassificationPattern],
-) -> Result<()> {
+) -> Result<usize> {
+    let min = ctx.app.config.safety.auto_apply_min_confidence;
     let mut config = ctx.app.config.clone();
-    let mut changed = false;
+    let mut saved = 0usize;
 
     for p in patterns {
-        if p.confidence < AUTO_SAVE_PATTERN_CONFIDENCE {
+        if !pattern_eligible_for_rule_save(p.confidence, &p.action, min) {
             continue;
         }
         if config.rules.iter().any(|r| r.r#match == p.match_pattern) {
@@ -349,12 +393,66 @@ fn maybe_save_patterns(
             priority: Some(p.priority),
             target_folder: p.target_folder.clone(),
         });
-        changed = true;
+        saved += 1;
     }
 
-    if changed {
+    if saved > 0 {
         save_config_file(&ctx.app.config_path, &config)?;
         ctx.app.config = config;
     }
-    Ok(())
+    Ok(saved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::schema::{MailAction, MessageCategory};
+
+    fn decision(action: MailAction, confidence: f32) -> MessageDecision {
+        MessageDecision {
+            account_id: "a".into(),
+            uid: 1,
+            message_id: None,
+            category: MessageCategory::Newsletter,
+            priority: 2,
+            action,
+            target_folder: None,
+            tags: vec![],
+            confidence,
+            reason: "test".into(),
+        }
+    }
+
+    #[test]
+    fn tiers_soft_hint_low_confidence_safe_actions() {
+        let safety = SafetyConfig::default();
+        let (plan, hints) = tier_llm_decisions(
+            vec![
+                decision(MailAction::Archive, 0.4),
+                decision(MailAction::Archive, 0.7),
+                decision(MailAction::Delete, 0.3),
+            ],
+            &safety,
+        );
+        assert_eq!(hints.len(), 1);
+        assert_eq!(plan.len(), 2);
+        assert!(plan.iter().any(|d| d.action.is_destructive()));
+    }
+
+    #[test]
+    fn never_auto_saves_delete_patterns() {
+        assert!(!pattern_eligible_for_rule_save(0.99, "delete", 0.88));
+        assert!(pattern_eligible_for_rule_save(0.90, "archive", 0.88));
+        assert!(!pattern_eligible_for_rule_save(0.80, "archive", 0.88));
+    }
+
+    #[test]
+    fn auto_applicable_requires_safe_and_high_conf() {
+        let d = decision(MailAction::Archive, 0.9);
+        assert!(d.is_auto_applicable(0.88));
+        let d = decision(MailAction::Delete, 0.99);
+        assert!(!d.is_auto_applicable(0.88));
+        let d = decision(MailAction::Flag, 0.7);
+        assert!(!d.is_auto_applicable(0.88));
+    }
 }

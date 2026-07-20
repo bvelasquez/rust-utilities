@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
+use std::time::Duration;
 
 pub async fn chat_json(api_key: &str, model: &str, system: &str, user: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("build HTTP client")?;
     let body = serde_json::json!({
         "model": model,
         "temperature": 0.2,
@@ -19,10 +24,13 @@ pub async fn chat_json(api_key: &str, model: &str, system: &str, user: &str) -> 
         .header("X-Title", "mail-sweep")
         .json(&body)
         .send()
-        .await?
-        .error_for_status()?
+        .await
+        .context("OpenRouter request failed (check network / API key)")?
+        .error_for_status()
+        .context("OpenRouter HTTP error")?
         .json::<serde_json::Value>()
-        .await?;
+        .await
+        .context("decode OpenRouter JSON")?;
 
     if let Some(err) = resp["error"]["message"].as_str() {
         anyhow::bail!("OpenRouter API error: {err}");
