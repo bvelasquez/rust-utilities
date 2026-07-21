@@ -63,6 +63,7 @@ pub fn config_schema_json() -> serde_json::Value {
                 "sync.batch_size": "Sender groups per AI pattern batch (not per-email)",
                 "sync.initial_fetch_limit": "Max recent messages on first sync of a new account (default 50)",
                 "sync.full_fetch_limit": "Max messages for sync --full backfill (default 500)",
+                "sync.imap_timeout_secs": "Per IMAP operation timeout in seconds (default 120); aborts stalled sync/apply",
                 "safety.allow_delete": "Allow IMAP delete actions",
                 "safety.auto_apply_min_confidence": "AUTO applies safe actions + saves rules at/above this (default 0.88)",
                 "safety.plan_min_confidence": "LLM suggestions below this stay as Triage category hints (default 0.55)",

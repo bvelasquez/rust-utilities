@@ -6,6 +6,8 @@ use async_std::net::TcpStream;
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::future::Future;
+use std::time::Duration;
 
 use crate::agent::schema::{MailAction, MessageDecision};
 use crate::config::AccountConfig;
@@ -21,6 +23,14 @@ fn capability_name(cap: &Capability) -> String {
     }
 }
 
+/// Bound any IMAP await so a stalled server cannot hang the process forever.
+async fn imap_timeout<T>(secs: u64, op: &str, fut: impl Future<Output = T>) -> Result<T> {
+    let secs = secs.max(1);
+    tokio::time::timeout(Duration::from_secs(secs), fut)
+        .await
+        .with_context(|| format!("IMAP {op} timed out after {secs}s"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountTestResult {
     pub account_id: String,
@@ -32,43 +42,61 @@ pub struct AccountTestResult {
     pub error: Option<String>,
 }
 
-pub async fn connect(account: &AccountConfig, password: &str) -> Result<ImapSession> {
+pub async fn connect(
+    account: &AccountConfig,
+    password: &str,
+    timeout_secs: u64,
+) -> Result<ImapSession> {
     let addr = format!("{}:{}", account.imap_host, account.imap_port);
-    let tcp = TcpStream::connect(&addr)
-        .await
-        .with_context(|| format!("connect to {addr}"))?;
+    let tcp = imap_timeout(timeout_secs, &format!("connect to {addr}"), async {
+        TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("connect to {addr}"))
+    })
+    .await??;
 
     let tls = TlsConnector::new();
     let domain = account.imap_host.as_str();
-    let tls_stream = tls
-        .connect(domain, tcp)
-        .await
-        .with_context(|| format!("TLS handshake with {domain}"))?;
+    let tls_stream = imap_timeout(timeout_secs, &format!("TLS handshake with {domain}"), async {
+        tls.connect(domain, tcp)
+            .await
+            .with_context(|| format!("TLS handshake with {domain}"))
+    })
+    .await??;
 
     let client = async_imap::Client::new(tls_stream);
-    let session = client
-        .login(&account.email, password)
-        .await
-        .map_err(|(e, _)| e)
-        .with_context(|| format!("IMAP login for {}", account.email))?;
+    let session = imap_timeout(timeout_secs, &format!("login for {}", account.email), async {
+        client
+            .login(&account.email, password)
+            .await
+            .map_err(|(e, _)| e)
+            .with_context(|| format!("IMAP login for {}", account.email))
+    })
+    .await??;
 
     Ok(session)
 }
 
-pub async fn test_account(account: &AccountConfig, password: &str) -> AccountTestResult {
-    match connect(account, password).await {
+pub async fn test_account(
+    account: &AccountConfig,
+    password: &str,
+    timeout_secs: u64,
+) -> AccountTestResult {
+    match connect(account, password, timeout_secs).await {
         Ok(mut session) => {
-            let caps: Vec<String> = session
-                .capabilities()
+            let caps: Vec<String> = imap_timeout(timeout_secs, "capabilities", session.capabilities())
                 .await
                 .ok()
+                .and_then(|r| r.ok())
                 .map(|c| c.iter().map(capability_name).collect())
                 .unwrap_or_default();
 
-            let select = session.select(&account.inbox_folder).await;
+            let select =
+                imap_timeout(timeout_secs, "select inbox", session.select(&account.inbox_folder))
+                    .await;
             match select {
-                Ok(mailbox) => {
-                    let _ = session.logout().await;
+                Ok(Ok(mailbox)) => {
+                    let _ = imap_timeout(timeout_secs, "logout", session.logout()).await;
                     AccountTestResult {
                         account_id: account.id.clone(),
                         ok: true,
@@ -79,6 +107,15 @@ pub async fn test_account(account: &AccountConfig, password: &str) -> AccountTes
                         error: None,
                     }
                 }
+                Ok(Err(e)) => AccountTestResult {
+                    account_id: account.id.clone(),
+                    ok: false,
+                    imap_ok: false,
+                    message_count: None,
+                    capabilities: caps,
+                    inbox_folder: account.inbox_folder.clone(),
+                    error: Some(e.to_string()),
+                },
                 Err(e) => AccountTestResult {
                     account_id: account.id.clone(),
                     ok: false,
@@ -110,14 +147,23 @@ pub async fn fetch_new_messages(
     preview_chars: usize,
     initial_limit: usize,
     full_limit: usize,
+    timeout_secs: u64,
 ) -> Result<(Vec<(u32, ParsedMail, bool, bool)>, u32)> {
-    let mut session = connect(account, password).await?;
-    session.select(&account.inbox_folder).await?;
+    let mut session = connect(account, password, timeout_secs).await?;
+    imap_timeout(
+        timeout_secs,
+        "select inbox",
+        session.select(&account.inbox_folder),
+    )
+    .await?
+    .context("select inbox")?;
 
     let mut uid_set: HashSet<u32> = HashSet::new();
 
     if full || last_uid == 0 {
-        let uids = session.uid_search("ALL").await?;
+        let uids = imap_timeout(timeout_secs, "uid_search ALL", session.uid_search("ALL"))
+            .await?
+            .context("uid_search ALL")?;
         let mut uid_list: Vec<u32> = uids.into_iter().collect();
         uid_list.sort_unstable();
         // First sync: small recent window. --full: larger backfill. Never the whole mailbox.
@@ -132,14 +178,20 @@ pub async fn fetch_new_messages(
         }
     } else {
         // New mail since last sync
-        let new_uids = session
-            .uid_search(&format!("UID {}:*", last_uid.saturating_add(1)))
-            .await?;
+        let new_uids = imap_timeout(
+            timeout_secs,
+            "uid_search new",
+            session.uid_search(&format!("UID {}:*", last_uid.saturating_add(1))),
+        )
+        .await?
+        .context("uid_search new")?;
         uid_set.extend(new_uids);
 
         // Also refresh any currently-unread messages (UIDs may already be cached).
         // Without this, marking old mail unread in Gmail never updates the local cache.
-        let unseen = session.uid_search("UNSEEN").await?;
+        let unseen = imap_timeout(timeout_secs, "uid_search UNSEEN", session.uid_search("UNSEEN"))
+            .await?
+            .context("uid_search UNSEEN")?;
         uid_set.extend(unseen);
     }
 
@@ -147,7 +199,7 @@ pub async fn fetch_new_messages(
     uid_list.sort_unstable();
 
     if uid_list.is_empty() {
-        let _ = session.logout().await;
+        let _ = imap_timeout(timeout_secs, "logout", session.logout()).await;
         return Ok((vec![], last_uid));
     }
 
@@ -163,11 +215,15 @@ pub async fn fetch_new_messages(
     let mut out = Vec::new();
     {
         // BODY.PEEK[] — do NOT use RFC822/BODY[]; those implicitly set \Seen on Gmail.
-        let mut fetched = session
-            .uid_fetch(&uid_set_str, "(UID FLAGS BODY.PEEK[])")
-            .await?;
-        while let Some(msg) = fetched.next().await {
-            let msg = msg?;
+        let mut fetched = imap_timeout(
+            timeout_secs,
+            "uid_fetch start",
+            session.uid_fetch(&uid_set_str, "(UID FLAGS BODY.PEEK[])"),
+        )
+        .await?
+        .context("uid_fetch")?;
+        while let Some(msg) = imap_timeout(timeout_secs, "uid_fetch next", fetched.next()).await? {
+            let msg = msg.context("uid_fetch message")?;
             if let Some(parsed) = parse_fetch(msg, preview_chars) {
                 // Include: new UIDs, full sync, or UNSEEN refresh of already-seen UIDs
                 if parsed.0 > last_uid || full || parsed.2 {
@@ -177,7 +233,7 @@ pub async fn fetch_new_messages(
         }
     }
 
-    let _ = session.logout().await;
+    let _ = imap_timeout(timeout_secs, "logout", session.logout()).await;
     Ok((out, high_water))
 }
 
@@ -199,6 +255,7 @@ pub async fn apply_decisions(
     decisions: &[MessageDecision],
     allow_delete: bool,
     dry_run: bool,
+    timeout_secs: u64,
     mut on_step: Option<&mut ApplyStepCallback<'_>>,
 ) -> Result<Vec<ActionResult>> {
     if dry_run {
@@ -222,9 +279,15 @@ pub async fn apply_decisions(
         return Ok(results);
     }
 
-    let mut session = connect(account, password).await?;
-    session.select(&account.inbox_folder).await?;
-    let mailboxes = list_mailboxes(&mut session).await?;
+    let mut session = connect(account, password, timeout_secs).await?;
+    imap_timeout(
+        timeout_secs,
+        "select inbox",
+        session.select(&account.inbox_folder),
+    )
+    .await?
+    .context("select inbox")?;
+    let mailboxes = list_mailboxes(&mut session, timeout_secs).await?;
 
     let mut results = Vec::new();
     for (i, d) in decisions.iter().enumerate() {
@@ -234,17 +297,22 @@ pub async fn apply_decisions(
         let uid = d.uid.to_string();
         let result = match d.action {
             MailAction::Keep => ActionResult::ok(&d.account_id, d.uid, "keep"),
-            MailAction::MarkRead => match drain_uid_store(&mut session, &uid, "+FLAGS (\\Seen)").await
-            {
-                Ok(()) => ActionResult::ok(&d.account_id, d.uid, "mark_read"),
-                Err(e) => ActionResult::err(&d.account_id, d.uid, "mark_read", &e.to_string()),
-            },
-            MailAction::Flag => match drain_uid_store(&mut session, &uid, "+FLAGS (\\Flagged)").await {
-                Ok(()) => ActionResult::ok(&d.account_id, d.uid, "flag"),
-                Err(e) => ActionResult::err(&d.account_id, d.uid, "flag", &e.to_string()),
-            },
+            MailAction::MarkRead => {
+                match drain_uid_store(&mut session, &uid, "+FLAGS (\\Seen)", timeout_secs).await {
+                    Ok(()) => ActionResult::ok(&d.account_id, d.uid, "mark_read"),
+                    Err(e) => ActionResult::err(&d.account_id, d.uid, "mark_read", &e.to_string()),
+                }
+            }
+            MailAction::Flag => {
+                match drain_uid_store(&mut session, &uid, "+FLAGS (\\Flagged)", timeout_secs).await
+                {
+                    Ok(()) => ActionResult::ok(&d.account_id, d.uid, "flag"),
+                    Err(e) => ActionResult::err(&d.account_id, d.uid, "flag", &e.to_string()),
+                }
+            }
             MailAction::Unflag => {
-                match drain_uid_store(&mut session, &uid, "-FLAGS (\\Flagged)").await {
+                match drain_uid_store(&mut session, &uid, "-FLAGS (\\Flagged)", timeout_secs).await
+                {
                     Ok(()) => ActionResult::ok(&d.account_id, d.uid, "unflag"),
                     Err(e) => ActionResult::err(&d.account_id, d.uid, "unflag", &e.to_string()),
                 }
@@ -256,7 +324,7 @@ pub async fn apply_decisions(
                     d.target_folder.as_deref(),
                     &account.archive_folder,
                 );
-                match move_message(&mut session, &uid, &dest).await {
+                match move_message(&mut session, &uid, &dest, timeout_secs).await {
                     Ok(()) => ActionResult::ok_detail(
                         &d.account_id,
                         d.uid,
@@ -273,7 +341,7 @@ pub async fn apply_decisions(
                     d.target_folder.as_deref(),
                     &account.archive_folder,
                 );
-                match move_message(&mut session, &uid, &dest).await {
+                match move_message(&mut session, &uid, &dest, timeout_secs).await {
                     Ok(()) => ActionResult::ok_detail(
                         &d.account_id,
                         d.uid,
@@ -291,7 +359,7 @@ pub async fn apply_decisions(
                         Some(folder),
                         &account.archive_folder,
                     );
-                    match copy_to_folder(&mut session, &uid, &dest).await {
+                    match copy_to_folder(&mut session, &uid, &dest, timeout_secs).await {
                         Ok(()) => ActionResult::ok_detail(
                             &d.account_id,
                             d.uid,
@@ -309,8 +377,9 @@ pub async fn apply_decisions(
                     ActionResult::err(&d.account_id, d.uid, "delete", "delete not allowed")
                 } else {
                     match async {
-                        drain_uid_store(&mut session, &uid, "+FLAGS (\\Deleted)").await?;
-                        drain_expunge(&mut session).await
+                        drain_uid_store(&mut session, &uid, "+FLAGS (\\Deleted)", timeout_secs)
+                            .await?;
+                        drain_expunge(&mut session, timeout_secs).await
                     }
                     .await
                     {
@@ -326,28 +395,74 @@ pub async fn apply_decisions(
         results.push(result);
     }
 
-    let _ = session.logout().await;
+    let _ = imap_timeout(timeout_secs, "logout", session.logout()).await;
     Ok(results)
 }
 
-async fn drain_uid_store(session: &mut ImapSession, uid: &str, query: &str) -> Result<()> {
-    let stream = session.uid_store(uid, query).await?;
-    futures::pin_mut!(stream);
-    while stream.next().await.transpose()?.is_some() {}
+/// Mark a single message \\Seen on the server (inbox survivors / leftover unread).
+pub async fn mark_seen(
+    account: &AccountConfig,
+    password: &str,
+    uid: u32,
+    timeout_secs: u64,
+) -> Result<()> {
+    let mut session = connect(account, password, timeout_secs).await?;
+    imap_timeout(
+        timeout_secs,
+        "select inbox",
+        session.select(&account.inbox_folder),
+    )
+    .await?
+    .context("select inbox")?;
+    drain_uid_store(
+        &mut session,
+        &uid.to_string(),
+        "+FLAGS (\\Seen)",
+        timeout_secs,
+    )
+    .await?;
+    let _ = imap_timeout(timeout_secs, "logout", session.logout()).await;
     Ok(())
 }
 
-async fn drain_expunge(session: &mut ImapSession) -> Result<()> {
-    let stream = session.expunge().await?;
+async fn drain_uid_store(
+    session: &mut ImapSession,
+    uid: &str,
+    query: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+    let stream = imap_timeout(timeout_secs, "uid_store", session.uid_store(uid, query))
+        .await?
+        .context("uid_store")?;
     futures::pin_mut!(stream);
-    while stream.next().await.transpose()?.is_some() {}
+    while imap_timeout(timeout_secs, "uid_store next", stream.next())
+        .await?
+        .transpose()?
+        .is_some()
+    {}
     Ok(())
 }
-async fn list_mailboxes(session: &mut ImapSession) -> Result<HashSet<String>> {
+
+async fn drain_expunge(session: &mut ImapSession, timeout_secs: u64) -> Result<()> {
+    let stream = imap_timeout(timeout_secs, "expunge", session.expunge())
+        .await?
+        .context("expunge")?;
+    futures::pin_mut!(stream);
+    while imap_timeout(timeout_secs, "expunge next", stream.next())
+        .await?
+        .transpose()?
+        .is_some()
+    {}
+    Ok(())
+}
+
+async fn list_mailboxes(session: &mut ImapSession, timeout_secs: u64) -> Result<HashSet<String>> {
     let mut names = HashSet::new();
-    let mut stream = session.list(None, Some("*")).await?;
-    while let Some(mb) = stream.next().await {
-        let mb = mb?;
+    let mut stream = imap_timeout(timeout_secs, "list mailboxes", session.list(None, Some("*")))
+        .await?
+        .context("list mailboxes")?;
+    while let Some(mb) = imap_timeout(timeout_secs, "list next", stream.next()).await? {
+        let mb = mb.context("list mailbox")?;
         names.insert(mb.name().to_string());
     }
     Ok(names)
@@ -377,19 +492,38 @@ pub fn resolve_mailbox(
     }
 }
 
-async fn move_message(session: &mut ImapSession, uid: &str, dest: &str) -> Result<()> {
-    if session.capabilities().await?.has_str("MOVE") {
-        session.uid_mv(uid, dest).await?;
+async fn move_message(
+    session: &mut ImapSession,
+    uid: &str,
+    dest: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+    let caps = imap_timeout(timeout_secs, "capabilities", session.capabilities())
+        .await?
+        .context("capabilities")?;
+    if caps.has_str("MOVE") {
+        imap_timeout(timeout_secs, "uid_mv", session.uid_mv(uid, dest))
+            .await?
+            .context("uid_mv")?;
     } else {
-        session.uid_copy(uid, dest).await?;
-        drain_uid_store(session, uid, "+FLAGS (\\Deleted)").await?;
-        drain_expunge(session).await?;
+        imap_timeout(timeout_secs, "uid_copy", session.uid_copy(uid, dest))
+            .await?
+            .context("uid_copy")?;
+        drain_uid_store(session, uid, "+FLAGS (\\Deleted)", timeout_secs).await?;
+        drain_expunge(session, timeout_secs).await?;
     }
     Ok(())
 }
 
-async fn copy_to_folder(session: &mut ImapSession, uid: &str, dest: &str) -> Result<()> {
-    session.uid_copy(uid, dest).await?;
+async fn copy_to_folder(
+    session: &mut ImapSession,
+    uid: &str,
+    dest: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+    imap_timeout(timeout_secs, "uid_copy", session.uid_copy(uid, dest))
+        .await?
+        .context("uid_copy")?;
     Ok(())
 }
 
@@ -456,5 +590,18 @@ mod tests {
         );
         assert_eq!(dest, "Promotions");
         assert!(note.is_none());
+    }
+
+    #[tokio::test]
+    async fn imap_timeout_fires() {
+        let err = imap_timeout(1, "sleep", async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            42
+        })
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(msg.contains("sleep"), "{msg}");
     }
 }

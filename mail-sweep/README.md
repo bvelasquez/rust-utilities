@@ -75,6 +75,7 @@ poll_interval = "5m"
 batch_size = 25
 initial_fetch_limit = 50
 full_fetch_limit = 500
+imap_timeout_secs = 120
 
 [safety]
 allow_delete = false

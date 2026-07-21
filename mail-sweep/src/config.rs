@@ -27,6 +27,10 @@ pub struct SyncConfig {
     /// Max messages when using `sync --full` / backfill.
     #[serde(default = "default_full_fetch_limit")]
     pub full_fetch_limit: usize,
+    /// Per IMAP operation timeout (connect, search, fetch chunk, store, …).
+    /// Prevents sync/apply from hanging forever on a stalled server.
+    #[serde(default = "default_imap_timeout_secs")]
+    pub imap_timeout_secs: u64,
     #[serde(default)]
     pub auto_process: bool,
 }
@@ -39,6 +43,7 @@ impl Default for SyncConfig {
             body_preview_chars: default_body_preview(),
             initial_fetch_limit: default_initial_fetch_limit(),
             full_fetch_limit: default_full_fetch_limit(),
+            imap_timeout_secs: default_imap_timeout_secs(),
             auto_process: false,
         }
     }
@@ -62,6 +67,10 @@ fn default_initial_fetch_limit() -> usize {
 
 fn default_full_fetch_limit() -> usize {
     500
+}
+
+fn default_imap_timeout_secs() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

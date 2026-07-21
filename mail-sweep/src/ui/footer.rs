@@ -11,9 +11,9 @@ use super::Tab;
 #[derive(Clone, Debug)]
 pub enum Activity {
     Ready,
-    Syncing,
-    Classifying,
     Applying,
+    /// Generic in-progress work — shown inline in the footer status line.
+    Busy(String),
     AutoIdle,
     Success(String),
     Error(String),
@@ -29,25 +29,18 @@ impl Activity {
                     Style::default().fg(theme::OK),
                 ),
             ],
-            Self::Syncing => vec![
-                Span::styled("◌ ", Style::default().fg(theme::ACCENT)),
-                Span::styled(
-                    "Syncing new mail…",
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-                ),
-            ],
-            Self::Classifying => vec![
-                Span::styled("◌ ", Style::default().fg(theme::AI)),
-                Span::styled(
-                    "AI learning patterns for unclassified senders…",
-                    Style::default().fg(theme::AI).add_modifier(Modifier::BOLD),
-                ),
-            ],
             Self::Applying => vec![
                 Span::styled("◌ ", Style::default().fg(theme::WARN)),
                 Span::styled(
                     "Applying to Gmail…",
                     Style::default().fg(theme::WARN).add_modifier(Modifier::BOLD),
+                ),
+            ],
+            Self::Busy(msg) => vec![
+                Span::styled("◌ ", Style::default().fg(theme::ACCENT)),
+                Span::styled(
+                    format!("{msg}…"),
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
                 ),
             ],
             Self::AutoIdle => vec![

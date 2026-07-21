@@ -65,6 +65,16 @@ pub async fn do_apply_auto(ctx: &CommandContext) -> Result<String> {
     Ok(format_apply_summary(&summary))
 }
 
+pub async fn do_mark_read(ctx: &CommandContext, account_id: &str, uid: u32) -> Result<String> {
+    let account = ctx.app.account_by_id(account_id)?;
+    let password = ctx.app.resolve_password(account)?;
+    let timeout = ctx.app.config.sync.imap_timeout_secs;
+    crate::mail::imap::mark_seen(account, &password, uid, timeout).await?;
+    let store = crate::store::Store::open(&ctx.app.db_path())?;
+    store.mark_message_read(account_id, uid)?;
+    Ok(format!("Marked read — {account_id} uid {uid}"))
+}
+
 fn format_apply_summary(summary: &apply::ApplySummary) -> String {
     let mut msg = format!(
         "Applied plan #{} — {} ok, {} failed",

@@ -433,6 +433,32 @@ impl Store {
             .context("get message")
     }
 
+    /// Unread keep/flag mail that survived the noise filter (still in the inbox).
+    pub fn unread_kept_messages(&self, limit: usize) -> Result<Vec<CachedMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, account_id, uid, message_id, from_address, from_name, subject, date,
+                    category, priority, status, is_unread, is_flagged, body_preview, body_text,
+                    list_unsubscribe, raw_headers_json, planned_action, plan_confidence, plan_reason
+             FROM messages
+             WHERE is_unread = 1
+               AND status IN ('applied', 'planned')
+               AND planned_action IN ('keep', 'flag')
+             ORDER BY COALESCE(date, '') DESC, uid DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], row_to_message)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("unread kept messages")
+    }
+
+    pub fn mark_message_read(&self, account_id: &str, uid: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET is_unread = 0 WHERE account_id = ?1 AND uid = ?2",
+            params![account_id, uid],
+        )?;
+        Ok(())
+    }
+
     pub fn pending_sender_groups(&self, limit: usize) -> Result<Vec<PendingSenderGroup>> {
         let mut stmt = self.conn.prepare(
             "SELECT g.from_address, g.account_id, g.cnt, g.unread, m.id, m.subject
@@ -1175,6 +1201,26 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub fn seed_applied_message(
+        &self,
+        account_id: &str,
+        uid: u32,
+        from: &str,
+        action: &str,
+        unread: bool,
+        body: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO messages (
+                account_id, uid, from_address, subject, status, category, priority,
+                is_unread, is_flagged, body_preview, body_text, planned_action, applied_at
+             ) VALUES (?1, ?2, ?3, 'subj', 'applied', 'personal', 3, ?4, 0, ?5, ?5, ?6, datetime('now'))",
+            params![account_id, uid, from, unread as i32, body, action],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn message_status(&self, account_id: &str, uid: u32) -> Result<String> {
         self.conn
             .query_row(
@@ -1245,6 +1291,44 @@ mod tests {
             confidence,
             reason: "test".into(),
         }
+    }
+
+    #[test]
+    fn unread_kept_includes_keep_and_flag_excludes_archive() {
+        let (_dir, store) = test_store();
+        store
+            .seed_applied_message("personal", 1, "a@x.com", "keep", true, "hello keep")
+            .unwrap();
+        store
+            .seed_applied_message("personal", 2, "b@x.com", "flag", true, "hello flag")
+            .unwrap();
+        store
+            .seed_applied_message("personal", 3, "c@x.com", "archive", true, "gone")
+            .unwrap();
+        store
+            .seed_applied_message("personal", 4, "d@x.com", "keep", false, "already read")
+            .unwrap();
+
+        let kept = store.unread_kept_messages(50).unwrap();
+        assert_eq!(kept.len(), 2);
+        let actions: Vec<_> = kept
+            .iter()
+            .map(|m| m.planned_action.as_deref().unwrap_or(""))
+            .collect();
+        assert!(actions.contains(&"keep"));
+        assert!(actions.contains(&"flag"));
+    }
+
+    #[test]
+    fn mark_message_read_removes_from_unread_kept() {
+        let (_dir, store) = test_store();
+        store
+            .seed_applied_message("personal", 1, "a@x.com", "keep", true, "body")
+            .unwrap();
+        assert_eq!(store.unread_kept_messages(10).unwrap().len(), 1);
+        store.mark_message_read("personal", 1).unwrap();
+        assert!(store.unread_kept_messages(10).unwrap().is_empty());
+        assert_eq!(store.message_status("personal", 1).unwrap(), "applied");
     }
 
     #[test]

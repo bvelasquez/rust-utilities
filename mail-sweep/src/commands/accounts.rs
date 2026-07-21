@@ -163,7 +163,8 @@ fn run_add(
 async fn run_test(ctx: &CommandContext, id: &str) -> Result<()> {
     let account = ctx.app.account_by_id(id)?;
     let password = ctx.app.resolve_password(account)?;
-    let result = imap::test_account(account, &password).await;
+    let timeout_secs = ctx.app.config.sync.imap_timeout_secs;
+    let result = imap::test_account(account, &password, timeout_secs).await;
 
     if ctx.json {
         Envelope::ok("accounts test", result).print_json()?;

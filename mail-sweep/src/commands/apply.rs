@@ -206,12 +206,14 @@ pub async fn execute_apply_scoped(
         emit(&progress);
 
         let mut step = progress.current_step();
+        let timeout_secs = ctx.app.config.sync.imap_timeout_secs;
         let results = match imap::apply_decisions(
             account,
             &password,
             &account_decisions,
             allow_delete,
             dry_run,
+            timeout_secs,
             Some(&mut |_i, decision, result: &ActionResult| {
                 step += 1;
                 progress.on_message(

@@ -3,8 +3,8 @@ mod analytics;
 mod footer;
 mod help;
 mod keys;
+mod message_view;
 mod pattern_prompt;
-mod progress;
 mod queue;
 mod rule_overlays;
 mod rules_view;
@@ -129,11 +129,17 @@ enum OverlayMode {
         selected: usize,
         accepted: Vec<usize>,
     },
+    /// Read leftover unread keep/flag mail from the local cache.
+    MessageRead {
+        message: CachedMessage,
+        scroll: usize,
+    },
 }
 
 struct UiSnapshot<'a> {
     tab: Tab,
     sender_groups: &'a [PendingSenderGroup],
+    leftovers: &'a [CachedMessage],
     queue: &'a [CachedMessage],
     rules: &'a [RuleConfig],
     selected: usize,
@@ -153,6 +159,7 @@ struct UiSnapshot<'a> {
 }
 
 const SENDER_GROUP_LIMIT: usize = 500;
+const UNREAD_KEPT_LIMIT: usize = 200;
 
 struct LoopState {
     tab: Tab,
@@ -185,6 +192,11 @@ fn redraw(
 ) -> Result<()> {
     let store = Store::open(&ctx.app.db_path())?;
     let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
+    let leftovers = if sender_groups.is_empty() {
+        store.unread_kept_messages(UNREAD_KEPT_LIMIT)?
+    } else {
+        vec![]
+    };
     let queue = store.review_queue(ctx.app.config.safety.review_threshold())?;
     let pending = store.pending_count(None)?;
     let queued = queue.len() as i64;
@@ -206,6 +218,7 @@ fn redraw(
             &UiSnapshot {
                 tab: state.tab,
                 sender_groups: &sender_groups,
+                leftovers: &leftovers,
                 queue: &queue,
                 rules: &rules,
                 selected: state.selected,
@@ -277,6 +290,11 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
     loop {
         let store = Store::open(&ctx.app.db_path())?;
         let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
+        let leftovers = if sender_groups.is_empty() {
+            store.unread_kept_messages(UNREAD_KEPT_LIMIT)?
+        } else {
+            vec![]
+        };
         let queue = store.review_queue(ctx.app.config.safety.review_threshold())?;
         let pending = store.pending_count(None)?;
         let rules = ctx.app.config.rules.clone();
@@ -289,6 +307,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
         clamp_selection(
             state.tab,
             &sender_groups,
+            &leftovers,
             &queue,
             &rules,
             state.rules_filter,
@@ -323,6 +342,18 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     }
                     continue;
                 }
+                if matches!(state.overlay, OverlayMode::MessageRead { .. }) {
+                    handle_message_read_key(
+                        &mut terminal,
+                        ctx,
+                        &mut state,
+                        &mut scroll,
+                        &poll_label,
+                        key.code,
+                    )
+                    .await;
+                    continue;
+                }
                 if matches!(state.overlay, OverlayMode::PatternEdit { .. })
                     && is_ai_pattern_generate_key(key.code, key.modifiers)
                 {
@@ -354,10 +385,12 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                 }
 
                 let sample_msg = sample_message(&store, &sender_groups, state.selected);
+                let leftover_msg = leftovers.get(state.selected).cloned();
                 let review_msg = queue.get(state.selected).cloned();
                 let teach_msg = match state.tab {
                     Tab::Review => review_msg.as_ref(),
-                    Tab::Triage => sample_msg.as_ref(),
+                    Tab::Triage if !sender_groups.is_empty() => sample_msg.as_ref(),
+                    Tab::Triage => leftover_msg.as_ref(),
                     _ => None,
                 };
 
@@ -375,6 +408,9 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     KeyCode::Char('j') | KeyCode::Down => match state.tab {
                         Tab::Triage if !sender_groups.is_empty() => {
                             state.selected = (state.selected + 1).min(sender_groups.len() - 1);
+                        }
+                        Tab::Triage if !leftovers.is_empty() => {
+                            state.selected = (state.selected + 1).min(leftovers.len() - 1);
                         }
                         Tab::Review if !queue.is_empty() => {
                             state.selected = (state.selected + 1).min(queue.len() - 1);
@@ -397,6 +433,36 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         }
                         _ => {}
                     },
+                    KeyCode::Enter
+                        if state.tab == Tab::Triage
+                            && sender_groups.is_empty()
+                            && leftover_msg.is_some() =>
+                    {
+                        if let Some(message) = leftover_msg {
+                            state.overlay = OverlayMode::MessageRead {
+                                message,
+                                scroll: 0,
+                            };
+                        }
+                    }
+                    KeyCode::Char('m')
+                        if state.tab == Tab::Triage
+                            && sender_groups.is_empty()
+                            && leftover_msg.is_some() =>
+                    {
+                        if let Some(msg) = leftover_msg.as_ref() {
+                            run_mark_read(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                &msg.account_id,
+                                msg.uid,
+                            )
+                            .await;
+                        }
+                    }
                     KeyCode::Char('.') if state.tab == Tab::Triage => {
                         state.analytics_period = state.analytics_period.next();
                         state.activity = Activity::Success(format!(
@@ -433,7 +499,14 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     KeyCode::Char('a')
                         if matches!(state.tab, Tab::Triage | Tab::Review) =>
                     {
-                        run_apply(&mut terminal, ctx, &mut state.activity).await;
+                        run_apply(
+                            &mut terminal,
+                            ctx,
+                            &mut state,
+                            &mut scroll,
+                            &poll_label,
+                        )
+                        .await;
                     }
                     KeyCode::Char('r') if state.tab == Tab::Review => {
                         if let Some(msg) = teach_msg {
@@ -451,7 +524,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             }
                         }
                     }
-                    KeyCode::Char('p') if state.tab == Tab::Triage => {
+                    KeyCode::Char('p') if state.tab == Tab::Triage && !sender_groups.is_empty() => {
                         run_pattern_suggest(
                             &mut terminal,
                             ctx,
@@ -465,24 +538,33 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     }
                     KeyCode::Char('z') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_junk_message(ctx, msg, false),
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
                                 "Junk subject rule",
+                                |c| process::teach_junk_message(c, msg, false),
                             );
                         }
                     }
                     KeyCode::Char('Z') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_junk_message(ctx, msg, true),
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
                                 "Junk sender rule",
+                                |c| process::teach_junk_message(c, msg, true),
                             );
                         }
                     }
                     KeyCode::Char('/') if state.tab == Tab::Triage => {
-                        if let Some(msg) = &sample_msg {
+                        let pattern_src = sample_msg.as_ref().or(leftover_msg.as_ref());
+                        if let Some(msg) = pattern_src {
                             state.overlay = OverlayMode::PatternEdit {
                                 buffer: subject_pattern_from(&msg.subject),
                                 desc: String::new(),
@@ -493,91 +575,115 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     }
                     KeyCode::Char('g') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_message_subject(
-                                    ctx,
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                "Archive subject",
+                                |c| process::teach_message_subject(
+                                    c,
                                     msg,
                                     "archive",
                                     Some("newsletter"),
                                     2,
                                 ),
-                                "Archive subject",
                             );
                         }
                     }
                     KeyCode::Char('G') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_message_sender(
-                                    ctx,
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                "Archive sender",
+                                |c| process::teach_message_sender(
+                                    c,
                                     msg,
                                     "archive",
                                     Some("newsletter"),
                                     2,
                                 ),
-                                "Archive sender",
                             );
                         }
                     }
                     KeyCode::Char('i') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_message_subject(
-                                    ctx,
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                "Important subject",
+                                |c| process::teach_message_subject(
+                                    c,
                                     msg,
                                     "flag",
                                     Some("priority"),
                                     5,
                                 ),
-                                "Important subject",
                             );
                         }
                     }
                     KeyCode::Char('I') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_message_sender(
-                                    ctx,
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                "Important sender",
+                                |c| process::teach_message_sender(
+                                    c,
                                     msg,
                                     "flag",
                                     Some("priority"),
                                     5,
                                 ),
-                                "Important sender",
                             );
                         }
                     }
                     KeyCode::Char('o') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_message_subject(
-                                    ctx,
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                "Keep subject",
+                                |c| process::teach_message_subject(
+                                    c,
                                     msg,
                                     "keep",
                                     Some("personal"),
                                     4,
                                 ),
-                                "Keep subject",
                             );
                         }
                     }
                     KeyCode::Char('O') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
-                            apply_teach_activity(
-                                &mut state.activity,
-                                process::teach_message_sender(
-                                    ctx,
+                            run_teach_with_busy(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                                "Keep sender",
+                                |c| process::teach_message_sender(
+                                    c,
                                     msg,
                                     "keep",
                                     Some("personal"),
                                     4,
                                 ),
-                                "Keep sender",
                             );
                         }
                     }
@@ -734,6 +840,9 @@ fn draw_ui(
         .map(|(i, t)| {
             let badge = match t {
                 Tab::Triage if snap.pending > 0 => format!(" ({})", snap.sender_groups.len()),
+                Tab::Triage if !snap.leftovers.is_empty() => {
+                    format!(" ({}✉)", snap.leftovers.len())
+                }
                 Tab::Review if snap.plan_total > 0 => {
                     if snap.queue.is_empty() {
                         format!(" ({}✓)", snap.plan_total)
@@ -772,6 +881,7 @@ fn draw_ui(
             f,
             chunks[2],
             snap.sender_groups,
+            snap.leftovers,
             snap.pending,
             snap.selected,
             &mut scroll.triage_table,
@@ -915,6 +1025,14 @@ fn draw_ui(
                 accepted,
                 &mut scroll.audit_list,
             ),
+            OverlayMode::MessageRead { message, scroll } => {
+                message_view::render_message_read(
+                    f,
+                    centered_rect(86, 82, f.area()),
+                    message,
+                    *scroll,
+                );
+            }
             OverlayMode::None => {}
         }
     }
@@ -959,12 +1077,9 @@ async fn run_pattern_from_desc(
     let current = buffer.clone();
     let _ = focus;
 
-    state.activity = Activity::Success("Generating pattern via OpenRouter…".into());
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-    state.activity = Activity::Classifying;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-
-    match crate::agent::pattern_from_desc::pattern_from_description(
+    state.activity = Activity::Busy("Generating pattern".into());
+    let _ = redraw(terminal, ctx, state, scroll, poll_label);
+    let result = crate::agent::pattern_from_desc::pattern_from_description(
         &ctx.app,
         &description,
         if current.trim().is_empty() {
@@ -973,8 +1088,9 @@ async fn run_pattern_from_desc(
             Some(current.as_str())
         },
     )
-    .await
-    {
+    .await;
+
+    match result {
         Ok(pattern) => {
             if let OverlayMode::PatternEdit {
                 buffer,
@@ -1069,6 +1185,202 @@ fn sample_message(
     store.get_message(group.sample_message_id).ok().flatten()
 }
 
+/// Paint busy status in the footer and keep the main UI visible (no full-screen modal).
+fn show_busy(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ctx: &CommandContext,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
+    label: &str,
+) {
+    state.activity = Activity::Busy(label.into());
+    let _ = redraw(terminal, ctx, state, scroll, poll_label);
+}
+
+/// Show footer busy status, then run a sync teach without covering the UI.
+fn run_teach_with_busy<F>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ctx: &mut CommandContext,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
+    label: &str,
+    op: F,
+) where
+    F: FnOnce(&mut CommandContext) -> Result<TeachReport>,
+{
+    show_busy(
+        terminal,
+        ctx,
+        state,
+        scroll,
+        poll_label,
+        &format!("Teaching · {label}"),
+    );
+    apply_teach_activity(&mut state.activity, op(ctx), label);
+}
+
+async fn run_mark_read(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ctx: &CommandContext,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
+    account_id: &str,
+    uid: u32,
+) {
+    // Drop covering overlays so the footer status is visible.
+    state.overlay = OverlayMode::None;
+    show_busy(
+        terminal,
+        ctx,
+        state,
+        scroll,
+        poll_label,
+        &format!("Marking read · {account_id} uid {uid}"),
+    );
+    let result = actions::do_mark_read(ctx, account_id, uid).await;
+    match result {
+        Ok(msg) => state.activity = Activity::Success(msg),
+        Err(e) => state.activity = Activity::Error(format!("Mark read failed: {e}")),
+    }
+}
+
+async fn handle_message_read_key(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ctx: &mut CommandContext,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
+    code: KeyCode,
+) {
+    let OverlayMode::MessageRead { message, scroll: body_scroll } = &state.overlay else {
+        return;
+    };
+    let account_id = message.account_id.clone();
+    let uid = message.uid;
+    let msg = message.clone();
+    let max_scroll = message_view::body_line_count(&msg).saturating_sub(1);
+
+    match code {
+        KeyCode::Esc => {
+            state.overlay = OverlayMode::None;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let OverlayMode::MessageRead { scroll, .. } = &mut state.overlay {
+                *scroll = (*scroll + 1).min(max_scroll);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let OverlayMode::MessageRead { scroll, .. } = &mut state.overlay {
+                *scroll = scroll.saturating_sub(1);
+            }
+        }
+        KeyCode::Char('m') => {
+            let _ = body_scroll;
+            run_mark_read(terminal, ctx, state, scroll, poll_label, &account_id, uid).await;
+        }
+        KeyCode::Char('z') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Junk subject rule",
+                |c| process::teach_junk_message(c, &msg, false),
+            );
+        }
+        KeyCode::Char('Z') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Junk sender rule",
+                |c| process::teach_junk_message(c, &msg, true),
+            );
+        }
+        KeyCode::Char('g') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Archive subject",
+                |c| process::teach_message_subject(c, &msg, "archive", Some("newsletter"), 2),
+            );
+        }
+        KeyCode::Char('G') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Archive sender",
+                |c| process::teach_message_sender(c, &msg, "archive", Some("newsletter"), 2),
+            );
+        }
+        KeyCode::Char('i') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Flag subject",
+                |c| process::teach_message_subject(c, &msg, "flag", Some("priority"), 5),
+            );
+        }
+        KeyCode::Char('I') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Flag sender",
+                |c| process::teach_message_sender(c, &msg, "flag", Some("priority"), 5),
+            );
+        }
+        KeyCode::Char('o') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Keep subject",
+                |c| process::teach_message_subject(c, &msg, "keep", Some("personal"), 4),
+            );
+        }
+        KeyCode::Char('O') => {
+            state.overlay = OverlayMode::None;
+            run_teach_with_busy(
+                terminal,
+                ctx,
+                state,
+                scroll,
+                poll_label,
+                "Keep sender",
+                |c| process::teach_message_sender(c, &msg, "keep", Some("personal"), 4),
+            );
+        }
+        _ => {}
+    }
+}
+
 fn short_addr(addr: &str) -> String {
     if addr.chars().count() <= 28 {
         addr.to_string()
@@ -1103,9 +1415,10 @@ async fn run_sync(
     scroll: &mut ScrollStates,
     poll_label: &str,
 ) {
-    state.activity = Activity::Syncing;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-    match actions::do_sync(ctx).await {
+    state.overlay = OverlayMode::None;
+    show_busy(terminal, ctx, state, scroll, poll_label, "Syncing mail");
+    let result = actions::do_sync(ctx).await;
+    match result {
         Ok(msg) => {
             let hint = if ctx.app.config.rules.is_empty() {
                 String::new()
@@ -1125,9 +1438,10 @@ async fn run_classify(
     scroll: &mut ScrollStates,
     poll_label: &str,
 ) {
-    state.activity = Activity::Classifying;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-    match actions::do_classify(ctx).await {
+    state.overlay = OverlayMode::None;
+    show_busy(terminal, ctx, state, scroll, poll_label, "AI classifying");
+    let result = actions::do_classify(ctx).await;
+    match result {
         Ok(msg) => state.activity = Activity::Success(msg),
         Err(e) => state.activity = Activity::Error(format!("Classify failed: {e}")),
     }
@@ -1136,25 +1450,18 @@ async fn run_classify(
 async fn run_apply(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ctx: &CommandContext,
-    activity: &mut Activity,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
 ) {
-    *activity = Activity::Applying;
-    let mut snap = crate::apply_progress::ApplySnapshot::default();
-    let draw = |t: &mut Terminal<CrosstermBackend<io::Stdout>>,
-                progress: &crate::apply_progress::ApplySnapshot| {
-        t.draw(|f| progress::render_apply_progress(f, f.area(), progress)).ok();
-    };
-    draw(terminal, &snap);
+    state.activity = Activity::Applying;
+    let _ = redraw(terminal, ctx, state, scroll, poll_label);
 
-    let result = actions::do_apply(ctx, Some(&mut |progress| {
-        snap = progress.clone();
-        draw(terminal, &snap);
-    }))
-    .await;
+    let result = actions::do_apply(ctx, None).await;
 
     match result {
-        Ok(msg) => *activity = Activity::Success(msg),
-        Err(e) => *activity = Activity::Error(format!("Apply failed: {e}")),
+        Ok(msg) => state.activity = Activity::Success(msg),
+        Err(e) => state.activity = Activity::Error(format!("Apply failed: {e}")),
     }
 }
 
@@ -1166,14 +1473,11 @@ async fn run_auto_cycle(
     poll_label: &str,
     last_auto: &mut Instant,
 ) {
-    state.activity = Activity::Syncing;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-
+    state.overlay = OverlayMode::None;
+    show_busy(terminal, ctx, state, scroll, poll_label, "AUTO sync");
     let sync_result = actions::do_sync(ctx).await;
 
-    state.activity = Activity::Classifying;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-
+    show_busy(terminal, ctx, state, scroll, poll_label, "AUTO classify");
     let classify_result = actions::do_classify(ctx).await;
 
     let apply_result: Result<Option<String>, anyhow::Error> = async {
@@ -1181,8 +1485,7 @@ async fn run_auto_cycle(
         if store.latest_pending_plan()?.is_none() {
             return Ok(None);
         }
-        state.activity = Activity::Applying;
-        redraw(terminal, ctx, state, scroll, poll_label)?;
+        show_busy(terminal, ctx, state, scroll, poll_label, "AUTO apply");
         let summary = actions::do_apply_auto(ctx).await?;
         Ok(Some(summary))
     }
@@ -1208,6 +1511,7 @@ async fn run_auto_cycle(
 fn clamp_selection(
     tab: Tab,
     groups: &[PendingSenderGroup],
+    leftovers: &[CachedMessage],
     queue: &[CachedMessage],
     rules: &[RuleConfig],
     rules_filter: ActionFilter,
@@ -1217,6 +1521,12 @@ fn clamp_selection(
     match tab {
         Tab::Triage if !groups.is_empty() => {
             *selected = (*selected).min(groups.len() - 1);
+        }
+        Tab::Triage if !leftovers.is_empty() => {
+            *selected = (*selected).min(leftovers.len() - 1);
+        }
+        Tab::Triage => {
+            *selected = 0;
         }
         Tab::Review if !queue.is_empty() => {
             *selected = (*selected).min(queue.len() - 1);
@@ -1258,9 +1568,7 @@ async fn run_rules_audit(
     scroll: &mut ScrollStates,
     poll_label: &str,
 ) {
-    state.activity = Activity::Classifying;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-
+    show_busy(terminal, ctx, state, scroll, poll_label, "Auditing rules");
     let result = async {
         let store = Store::open(&ctx.app.db_path())?;
         audit_rules(&ctx.app, &ctx.app.config.rules, &store).await
@@ -1299,16 +1607,19 @@ async fn run_pattern_suggest(
     let Some(group) = groups.get(state.selected) else {
         return;
     };
-    state.activity = Activity::Classifying;
-    redraw(terminal, ctx, state, scroll, poll_label).ok();
-
+    let from = group.from_address.clone();
+    let account_id = group.account_id.clone();
+    show_busy(
+        terminal,
+        ctx,
+        state,
+        scroll,
+        poll_label,
+        &format!("Suggesting patterns · {from}"),
+    );
     let result = async {
-        let messages = store.messages_for_sender(
-            &group.from_address,
-            Some(&group.account_id),
-            50,
-        )?;
-        let detail = sender_detail_input(&group.from_address, &messages);
+        let messages = store.messages_for_sender(&from, Some(&account_id), 50)?;
+        let detail = sender_detail_input(&from, &messages);
         let plan = suggest_patterns(&ctx.app, &detail).await?;
         let items: Vec<SuggestItem> = plan
             .patterns
@@ -1745,6 +2056,10 @@ fn handle_overlay_key(
                 }
                 _ => {}
             }
+        }
+        OverlayMode::MessageRead { .. } => {
+            // Handled by handle_message_read_key (async mark-read / teach).
+            return false;
         }
     }
     true

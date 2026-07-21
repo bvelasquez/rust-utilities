@@ -57,6 +57,7 @@ pub async fn sync_all(
         let state = store.get_sync_state(&account.id)?;
         let initial_limit = ctx.app.config.sync.initial_fetch_limit;
         let full_limit = ctx.app.config.sync.full_fetch_limit;
+        let timeout_secs = ctx.app.config.sync.imap_timeout_secs;
         match imap::fetch_new_messages(
             account,
             &password,
@@ -65,6 +66,7 @@ pub async fn sync_all(
             preview,
             initial_limit,
             full_limit,
+            timeout_secs,
         )
         .await
         {
