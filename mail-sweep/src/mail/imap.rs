@@ -406,6 +406,19 @@ pub async fn mark_seen(
     uid: u32,
     timeout_secs: u64,
 ) -> Result<()> {
+    mark_seen_uids(account, password, &[uid], timeout_secs).await
+}
+
+/// Mark many messages \\Seen in one IMAP session (comma-separated UID STORE).
+pub async fn mark_seen_uids(
+    account: &AccountConfig,
+    password: &str,
+    uids: &[u32],
+    timeout_secs: u64,
+) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     let mut session = connect(account, password, timeout_secs).await?;
     imap_timeout(
         timeout_secs,
@@ -414,13 +427,12 @@ pub async fn mark_seen(
     )
     .await?
     .context("select inbox")?;
-    drain_uid_store(
-        &mut session,
-        &uid.to_string(),
-        "+FLAGS (\\Seen)",
-        timeout_secs,
-    )
-    .await?;
+    let uid_set = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    drain_uid_store(&mut session, &uid_set, "+FLAGS (\\Seen)", timeout_secs).await?;
     let _ = imap_timeout(timeout_secs, "logout", session.logout()).await;
     Ok(())
 }

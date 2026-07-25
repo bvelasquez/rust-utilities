@@ -63,6 +63,7 @@ fn help_lines() -> Vec<Line<'static>> {
         key("j/k", "Select sender group or leftover message"),
         key("Enter", "Read leftover unread message (cached body)"),
         key("m", "Mark leftover message as read on Gmail"),
+        key("M", "Mark all leftover unread keep/flag mail as read"),
         key("z / Z", "Junk — subject / whole sender (delete)"),
         key("g / G", "Archive subject / sender"),
         key("i / I", "Important subject / sender"),
@@ -76,7 +77,8 @@ fn help_lines() -> Vec<Line<'static>> {
         blank(),
         heading("Reading leftover mail"),
         plain("Enter opens a scrollable reader. Esc closes. m marks \\Seen on the server"),
-        plain("and removes it from the Unread list. Teach keys work in the reader too."),
+        plain("and removes it from the Unread list. M marks all leftovers read at once."),
+        plain("Teach keys work in the reader too."),
         blank(),
         heading("Review tab"),
         plain("Risky/uncertain plans land here. Taught/high-confidence actions may leave"),
@@ -128,7 +130,7 @@ fn help_lines() -> Vec<Line<'static>> {
 
 pub fn tab_hint(tab: Tab) -> Line<'static> {
     let text = match tab {
-        Tab::Triage => "Triage — teach senders · leftover unread: Enter read · m mark read",
+        Tab::Triage => "Triage — teach senders · leftover unread: Enter read · m / M mark read",
         Tab::Review => "Review — z/g/i/o correct · r reject · a apply plan",
         Tab::Rules => "Rules — e broaden pattern · x remove covered · X AI audit · d delete",
         Tab::Setup => "Enable AUTO to stop babysitting new mail",

@@ -213,6 +213,20 @@ pub fn performance_summary(start: &str, end: &str) -> String {
     )
 }
 
+pub fn conversion_breakdown(start: &str, end: &str) -> String {
+    format!(
+        "SELECT segments.conversion_action_name, metrics.conversions, metrics.all_conversions, metrics.conversions_value FROM customer WHERE segments.date BETWEEN '{start}' AND '{end}'"
+    )
+}
+
+pub fn enabled_campaigns_funnel() -> &'static str {
+    "SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type, campaign.serving_status, campaign_budget.amount_micros FROM campaign WHERE campaign.status = 'ENABLED'"
+}
+
+pub fn asset_group_strength() -> &'static str {
+    "SELECT campaign.id, campaign.name, asset_group.id, asset_group.name, asset_group.status, asset_group.ad_strength, asset_group.primary_status, asset_group.primary_status_reasons FROM asset_group WHERE campaign.status = 'ENABLED'"
+}
+
 pub fn conversion_tags() -> &'static str {
     "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.tag_snippets FROM conversion_action WHERE conversion_action.status != 'REMOVED'"
 }

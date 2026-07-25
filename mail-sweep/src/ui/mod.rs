@@ -463,6 +463,20 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             .await;
                         }
                     }
+                    KeyCode::Char('M')
+                        if state.tab == Tab::Triage
+                            && sender_groups.is_empty()
+                            && !leftovers.is_empty() =>
+                    {
+                        run_mark_all_read(
+                            &mut terminal,
+                            ctx,
+                            &mut state,
+                            &mut scroll,
+                            &poll_label,
+                        )
+                        .await;
+                    }
                     KeyCode::Char('.') if state.tab == Tab::Triage => {
                         state.analytics_period = state.analytics_period.next();
                         state.activity = Activity::Success(format!(
@@ -1247,6 +1261,32 @@ async fn run_mark_read(
     }
 }
 
+async fn run_mark_all_read(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ctx: &CommandContext,
+    state: &mut LoopState,
+    scroll: &mut ScrollStates,
+    poll_label: &str,
+) {
+    state.overlay = OverlayMode::None;
+    show_busy(
+        terminal,
+        ctx,
+        state,
+        scroll,
+        poll_label,
+        "Marking all unread keep/flag mail read",
+    );
+    let result = actions::do_mark_all_read(ctx, UNREAD_KEPT_LIMIT).await;
+    match result {
+        Ok(msg) => {
+            state.selected = 0;
+            state.activity = Activity::Success(msg);
+        }
+        Err(e) => state.activity = Activity::Error(format!("Mark all read failed: {e}")),
+    }
+}
+
 async fn handle_message_read_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ctx: &mut CommandContext,
@@ -1280,6 +1320,9 @@ async fn handle_message_read_key(
         KeyCode::Char('m') => {
             let _ = body_scroll;
             run_mark_read(terminal, ctx, state, scroll, poll_label, &account_id, uid).await;
+        }
+        KeyCode::Char('M') => {
+            run_mark_all_read(terminal, ctx, state, scroll, poll_label).await;
         }
         KeyCode::Char('z') => {
             state.overlay = OverlayMode::None;

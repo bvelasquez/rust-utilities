@@ -127,7 +127,7 @@ fn render_leftovers(
     table_state: &mut TableState,
 ) {
     let title = format!(
-        "Unread — {} kept in inbox (Enter read · m mark read)",
+        "Unread — {} kept in inbox (Enter read · m mark read · M mark all)",
         leftovers.len()
     );
     let header = Row::new(vec![

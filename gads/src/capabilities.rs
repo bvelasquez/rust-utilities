@@ -36,6 +36,7 @@ pub fn capabilities_json() -> serde_json::Value {
             { "id": "billing", "mutation": false, "requiresAuth": true },
             { "id": "change-status", "mutation": false, "requiresAuth": true },
             { "id": "summary", "mutation": false, "requiresAuth": true, "shortcut": true },
+            { "id": "funnel", "mutation": false, "requiresAuth": true, "shortcut": true },
             { "id": "conversion-tags", "mutation": false, "requiresAuth": true, "shortcut": true },
             { "id": "mutate", "mutation": true, "requiresAuth": true },
             { "id": "mutate-batch", "mutation": true, "requiresAuth": true },

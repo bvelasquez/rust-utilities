@@ -255,6 +255,16 @@ enum Commands {
         #[arg(long, default_value = "30")]
         days: i64,
     },
+    /// Funnel + conversion health report (shortcut for campaign improvement loops)
+    Funnel {
+        customer_id: Option<String>,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        end: Option<String>,
+        #[arg(long, default_value = "30")]
+        days: i64,
+    },
     /// Conversion tags filtered by domain (shortcut)
     #[command(name = "conversion-tags")]
     ConversionTags {
@@ -1099,6 +1109,21 @@ async fn main() -> Result<()> {
                 "summary",
                 rc.performance_summary(&start, &end).await?,
             )
+        }
+        Commands::Funnel {
+            customer_id,
+            start,
+            end,
+            days,
+        } => {
+            let cid = ctx.resolve_customer(customer_id.as_deref())?;
+            let (start, end) = resolve_date_range(start, end, days)?;
+            let client = ctx.client().await?;
+            let rc = ops::ReadContext {
+                client: &client,
+                customer_id: &cid,
+            };
+            ctx.emit("funnel", rc.funnel_report(&start, &end).await?)
         }
         Commands::ConversionTags { customer_id, domain } => {
             let cid = ctx.resolve_customer(customer_id.as_deref())?;

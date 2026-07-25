@@ -459,6 +459,17 @@ impl Store {
         Ok(())
     }
 
+    pub fn mark_messages_read(&self, items: &[(String, u32)]) -> Result<usize> {
+        let mut marked = 0usize;
+        for (account_id, uid) in items {
+            marked += self.conn.execute(
+                "UPDATE messages SET is_unread = 0 WHERE account_id = ?1 AND uid = ?2",
+                params![account_id, uid],
+            )?;
+        }
+        Ok(marked)
+    }
+
     pub fn pending_sender_groups(&self, limit: usize) -> Result<Vec<PendingSenderGroup>> {
         let mut stmt = self.conn.prepare(
             "SELECT g.from_address, g.account_id, g.cnt, g.unread, m.id, m.subject
@@ -1329,6 +1340,26 @@ mod tests {
         store.mark_message_read("personal", 1).unwrap();
         assert!(store.unread_kept_messages(10).unwrap().is_empty());
         assert_eq!(store.message_status("personal", 1).unwrap(), "applied");
+    }
+
+    #[test]
+    fn mark_messages_read_clears_all_unread_kept() {
+        let (_dir, store) = test_store();
+        store
+            .seed_applied_message("personal", 1, "a@x.com", "keep", true, "one")
+            .unwrap();
+        store
+            .seed_applied_message("work", 2, "b@x.com", "flag", true, "two")
+            .unwrap();
+        assert_eq!(store.unread_kept_messages(10).unwrap().len(), 2);
+        let marked = store
+            .mark_messages_read(&[
+                ("personal".into(), 1),
+                ("work".into(), 2),
+            ])
+            .unwrap();
+        assert_eq!(marked, 2);
+        assert!(store.unread_kept_messages(10).unwrap().is_empty());
     }
 
     #[test]

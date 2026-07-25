@@ -75,6 +75,42 @@ pub async fn do_mark_read(ctx: &CommandContext, account_id: &str, uid: u32) -> R
     Ok(format!("Marked read — {account_id} uid {uid}"))
 }
 
+/// Mark every leftover unread keep/flag message as read (all accounts).
+pub async fn do_mark_all_read(ctx: &CommandContext, limit: usize) -> Result<String> {
+    use std::collections::BTreeMap;
+
+    let store = crate::store::Store::open(&ctx.app.db_path())?;
+    let leftovers = store.unread_kept_messages(limit)?;
+    if leftovers.is_empty() {
+        return Ok("No unread keep/flag mail to mark".into());
+    }
+
+    let mut by_account: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    let mut items: Vec<(String, u32)> = Vec::with_capacity(leftovers.len());
+    for m in &leftovers {
+        by_account
+            .entry(m.account_id.clone())
+            .or_default()
+            .push(m.uid);
+        items.push((m.account_id.clone(), m.uid));
+    }
+
+    let timeout = ctx.app.config.sync.imap_timeout_secs;
+    for (account_id, uids) in &by_account {
+        let account = ctx.app.account_by_id(account_id)?;
+        let password = ctx.app.resolve_password(account)?;
+        crate::mail::imap::mark_seen_uids(account, &password, uids, timeout).await?;
+    }
+
+    let marked = store.mark_messages_read(&items)?;
+    let accounts = by_account.len();
+    Ok(format!(
+        "Marked read — {marked} message{} across {accounts} account{}",
+        if marked == 1 { "" } else { "s" },
+        if accounts == 1 { "" } else { "s" }
+    ))
+}
+
 fn format_apply_summary(summary: &apply::ApplySummary) -> String {
     let mut msg = format!(
         "Applied plan #{} — {} ok, {} failed",

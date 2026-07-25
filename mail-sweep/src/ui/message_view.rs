@@ -86,6 +86,8 @@ pub fn render_message_read(f: &mut Frame, area: Rect, msg: &CachedMessage, scrol
             Span::styled(" scroll  ", Style::default().fg(MUTED)),
             Span::styled("m", Style::default().fg(ACCENT)),
             Span::styled(" mark read  ", Style::default().fg(MUTED)),
+            Span::styled("M", Style::default().fg(ACCENT)),
+            Span::styled(" mark all  ", Style::default().fg(MUTED)),
             Span::styled("z/g/i/o", Style::default().fg(ACCENT)),
             Span::styled(" re-teach  ", Style::default().fg(MUTED)),
             Span::styled("Esc", Style::default().fg(ACCENT)),

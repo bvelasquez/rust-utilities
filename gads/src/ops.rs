@@ -167,6 +167,38 @@ impl<'a> ReadContext<'a> {
         self.query(&gaql::performance_summary(start, end)).await
     }
 
+    pub async fn funnel_report(&self, start: &str, end: &str) -> Result<Value> {
+        let summary = self.query(&gaql::performance_summary(start, end)).await?;
+        let conversions = self.query(&gaql::conversion_breakdown(start, end)).await?;
+        let campaigns = self.query(gaql::enabled_campaigns_funnel()).await?;
+        let asset_groups = self.query(gaql::asset_group_strength()).await?;
+        let conversion_actions = self.conversion_actions(100).await?;
+
+        Ok(json!({
+            "period": { "start": start, "end": end },
+            "summary": summary,
+            "conversionsByAction": conversions,
+            "enabledCampaigns": campaigns,
+            "assetGroups": asset_groups,
+            "conversionActions": conversion_actions,
+            "checklist": [
+                "Confirm primary conversion is Signup (or Purchase once revenue exists)",
+                "Import GA4 secondary events: app_store_click, first_meal_logged, paywall_view",
+                "Enable enhanced conversions + hashed email on signup",
+                "Link GA4 property G-3PCMCSTXCY to this Google Ads account",
+                "For iOS revenue: Firebase iOS app → Google Ads + App Store / SKAN",
+                "Reconcile Firestore marketing_funnel_events vs Ads attributed conversions",
+                "Set GA4_MP_API_SECRET on Cloud Functions for server-side event forward"
+            ],
+            "nextActions": [
+                "gads summary --days 7 --json",
+                "gads campaign-stats CUSTOMER --start START --end END --json",
+                "Review asset group ad_strength; replace Poor/Pending assets",
+                "Raise budget if search impression share stays under ~20%"
+            ]
+        }))
+    }
+
     pub async fn conversion_tags(&self, domain: Option<&str>) -> Result<Value> {
         let data = self.query(gaql::conversion_tags()).await?;
         if let Some(domain) = domain {
