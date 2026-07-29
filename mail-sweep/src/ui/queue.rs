@@ -65,14 +65,14 @@ pub fn render_queue(
 
     let title = if ready > 0 {
         format!(
-            "Review — {} need inspection · {} ready · a applies all {}",
+            "Review — {} need inspection · {} ready · Enter read · a applies all {}",
             items.len(),
             ready,
             plan_total
         )
     } else {
         format!(
-            "Review — {} need inspection before apply (a applies all {})",
+            "Review — {} need inspection (Enter read · a applies all {})",
             items.len(),
             plan_total.max(items.len())
         )

@@ -62,6 +62,29 @@ pub(crate) enum Tab {
     Setup = 3,
 }
 
+/// Which Triage list is active when both pending senders and unread leftovers exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriageFocus {
+    Senders,
+    Unread,
+}
+
+impl TriageFocus {
+    fn resolve(self, groups: &[PendingSenderGroup], leftovers: &[CachedMessage]) -> Self {
+        match self {
+            TriageFocus::Senders if !groups.is_empty() => TriageFocus::Senders,
+            TriageFocus::Senders if !leftovers.is_empty() => TriageFocus::Unread,
+            TriageFocus::Unread if !leftovers.is_empty() => TriageFocus::Unread,
+            TriageFocus::Unread if !groups.is_empty() => TriageFocus::Senders,
+            other => other,
+        }
+    }
+
+    fn showing_unread(self, groups: &[PendingSenderGroup], leftovers: &[CachedMessage]) -> bool {
+        matches!(self.resolve(groups, leftovers), TriageFocus::Unread)
+    }
+}
+
 impl Tab {
     fn all() -> [Tab; 4] {
         [Tab::Triage, Tab::Review, Tab::Rules, Tab::Setup]
@@ -129,7 +152,7 @@ enum OverlayMode {
         selected: usize,
         accepted: Vec<usize>,
     },
-    /// Read leftover unread keep/flag mail from the local cache.
+    /// Read a cached message body (Triage leftovers or Review queue).
     MessageRead {
         message: CachedMessage,
         scroll: usize,
@@ -140,6 +163,7 @@ struct UiSnapshot<'a> {
     tab: Tab,
     sender_groups: &'a [PendingSenderGroup],
     leftovers: &'a [CachedMessage],
+    triage_focus: TriageFocus,
     queue: &'a [CachedMessage],
     rules: &'a [RuleConfig],
     selected: usize,
@@ -172,6 +196,8 @@ struct LoopState {
     overlay: OverlayMode,
     rules_filter: ActionFilter,
     analytics_period: AnalyticsPeriod,
+    /// Remembers senders vs unread when both lists are non-empty.
+    triage_focus: TriageFocus,
 }
 
 struct ScrollStates {
@@ -192,11 +218,7 @@ fn redraw(
 ) -> Result<()> {
     let store = Store::open(&ctx.app.db_path())?;
     let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
-    let leftovers = if sender_groups.is_empty() {
-        store.unread_kept_messages(UNREAD_KEPT_LIMIT)?
-    } else {
-        vec![]
-    };
+    let leftovers = store.unread_kept_messages(UNREAD_KEPT_LIMIT)?;
     let queue = store.review_queue(ctx.app.config.safety.review_threshold())?;
     let pending = store.pending_count(None)?;
     let queued = queue.len() as i64;
@@ -219,6 +241,7 @@ fn redraw(
                 tab: state.tab,
                 sender_groups: &sender_groups,
                 leftovers: &leftovers,
+                triage_focus: state.triage_focus,
                 queue: &queue,
                 rules: &rules,
                 selected: state.selected,
@@ -265,6 +288,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
         overlay: OverlayMode::None,
         rules_filter: ActionFilter::All,
         analytics_period: AnalyticsPeriod::Day,
+        triage_focus: TriageFocus::Senders,
     };
     let mut scroll = ScrollStates {
         triage_table: TableState::default(),
@@ -290,14 +314,15 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
     loop {
         let store = Store::open(&ctx.app.db_path())?;
         let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
-        let leftovers = if sender_groups.is_empty() {
-            store.unread_kept_messages(UNREAD_KEPT_LIMIT)?
-        } else {
-            vec![]
-        };
+        let leftovers = store.unread_kept_messages(UNREAD_KEPT_LIMIT)?;
         let queue = store.review_queue(ctx.app.config.safety.review_threshold())?;
         let pending = store.pending_count(None)?;
         let rules = ctx.app.config.rules.clone();
+        let triage_focus = state
+            .triage_focus
+            .resolve(&sender_groups, &leftovers);
+        state.triage_focus = triage_focus;
+        let showing_unread = triage_focus.showing_unread(&sender_groups, &leftovers);
 
         if state.tab == Tab::Triage && pending > 0 && sender_groups.is_empty() {
             state.activity =
@@ -306,6 +331,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
 
         clamp_selection(
             state.tab,
+            showing_unread,
             &sender_groups,
             &leftovers,
             &queue,
@@ -384,13 +410,21 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     continue;
                 }
 
-                let sample_msg = sample_message(&store, &sender_groups, state.selected);
-                let leftover_msg = leftovers.get(state.selected).cloned();
+                let sample_msg = if showing_unread {
+                    None
+                } else {
+                    sample_message(&store, &sender_groups, state.selected)
+                };
+                let leftover_msg = if showing_unread {
+                    leftovers.get(state.selected).cloned()
+                } else {
+                    None
+                };
                 let review_msg = queue.get(state.selected).cloned();
                 let teach_msg = match state.tab {
                     Tab::Review => review_msg.as_ref(),
-                    Tab::Triage if !sender_groups.is_empty() => sample_msg.as_ref(),
-                    Tab::Triage => leftover_msg.as_ref(),
+                    Tab::Triage if showing_unread => leftover_msg.as_ref(),
+                    Tab::Triage => sample_msg.as_ref(),
                     _ => None,
                 };
 
@@ -406,11 +440,11 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         state.tab = Tab::from_index((c as usize) - ('1' as usize));
                     }
                     KeyCode::Char('j') | KeyCode::Down => match state.tab {
+                        Tab::Triage if showing_unread && !leftovers.is_empty() => {
+                            state.selected = (state.selected + 1).min(leftovers.len() - 1);
+                        }
                         Tab::Triage if !sender_groups.is_empty() => {
                             state.selected = (state.selected + 1).min(sender_groups.len() - 1);
-                        }
-                        Tab::Triage if !leftovers.is_empty() => {
-                            state.selected = (state.selected + 1).min(leftovers.len() - 1);
                         }
                         Tab::Review if !queue.is_empty() => {
                             state.selected = (state.selected + 1).min(queue.len() - 1);
@@ -433,9 +467,32 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         }
                         _ => {}
                     },
+                    KeyCode::Char('u')
+                        if state.tab == Tab::Triage
+                            && !sender_groups.is_empty()
+                            && !leftovers.is_empty() =>
+                    {
+                        state.triage_focus = match state.triage_focus {
+                            TriageFocus::Senders => TriageFocus::Unread,
+                            TriageFocus::Unread => TriageFocus::Senders,
+                        };
+                        state.selected = 0;
+                        state.activity = Activity::Success(match state.triage_focus {
+                            TriageFocus::Unread => format!(
+                                "Unread leftovers ({}) — m mark · M mark all · u back to senders",
+                                leftovers.len()
+                            ),
+                            TriageFocus::Senders => format!(
+                                "Pending senders ({}) — u for {} unread leftover{}",
+                                sender_groups.len(),
+                                leftovers.len(),
+                                if leftovers.len() == 1 { "" } else { "s" }
+                            ),
+                        });
+                    }
                     KeyCode::Enter
                         if state.tab == Tab::Triage
-                            && sender_groups.is_empty()
+                            && showing_unread
                             && leftover_msg.is_some() =>
                     {
                         if let Some(message) = leftover_msg {
@@ -445,11 +502,15 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             };
                         }
                     }
-                    KeyCode::Char('m')
-                        if state.tab == Tab::Triage
-                            && sender_groups.is_empty()
-                            && leftover_msg.is_some() =>
-                    {
+                    KeyCode::Enter if state.tab == Tab::Review && review_msg.is_some() => {
+                        if let Some(message) = review_msg {
+                            state.overlay = OverlayMode::MessageRead {
+                                message,
+                                scroll: 0,
+                            };
+                        }
+                    }
+                    KeyCode::Char('m') if state.tab == Tab::Triage => {
                         if let Some(msg) = leftover_msg.as_ref() {
                             run_mark_read(
                                 &mut terminal,
@@ -461,21 +522,30 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                                 msg.uid,
                             )
                             .await;
+                        } else if !leftovers.is_empty() {
+                            state.activity = Activity::Success(format!(
+                                "Press u for unread leftovers ({}), then m — or M to mark all",
+                                leftovers.len()
+                            ));
+                        } else {
+                            state.activity =
+                                Activity::Success("No unread keep/flag mail to mark".into());
                         }
                     }
-                    KeyCode::Char('M')
-                        if state.tab == Tab::Triage
-                            && sender_groups.is_empty()
-                            && !leftovers.is_empty() =>
-                    {
-                        run_mark_all_read(
-                            &mut terminal,
-                            ctx,
-                            &mut state,
-                            &mut scroll,
-                            &poll_label,
-                        )
-                        .await;
+                    KeyCode::Char('M') if state.tab == Tab::Triage => {
+                        if leftovers.is_empty() {
+                            state.activity =
+                                Activity::Success("No unread keep/flag mail to mark".into());
+                        } else {
+                            run_mark_all_read(
+                                &mut terminal,
+                                ctx,
+                                &mut state,
+                                &mut scroll,
+                                &poll_label,
+                            )
+                            .await;
+                        }
                     }
                     KeyCode::Char('.') if state.tab == Tab::Triage => {
                         state.analytics_period = state.analytics_period.next();
@@ -853,6 +923,9 @@ fn draw_ui(
         .enumerate()
         .map(|(i, t)| {
             let badge = match t {
+                Tab::Triage if snap.pending > 0 && !snap.leftovers.is_empty() => {
+                    format!(" ({}/{}✉)", snap.sender_groups.len(), snap.leftovers.len())
+                }
                 Tab::Triage if snap.pending > 0 => format!(" ({})", snap.sender_groups.len()),
                 Tab::Triage if !snap.leftovers.is_empty() => {
                     format!(" ({}✉)", snap.leftovers.len())
@@ -896,6 +969,7 @@ fn draw_ui(
             chunks[2],
             snap.sender_groups,
             snap.leftovers,
+            snap.triage_focus.showing_unread(snap.sender_groups, snap.leftovers),
             snap.pending,
             snap.selected,
             &mut scroll.triage_table,
@@ -1553,6 +1627,7 @@ async fn run_auto_cycle(
 
 fn clamp_selection(
     tab: Tab,
+    showing_unread: bool,
     groups: &[PendingSenderGroup],
     leftovers: &[CachedMessage],
     queue: &[CachedMessage],
@@ -1562,6 +1637,9 @@ fn clamp_selection(
     rules_selected: &mut usize,
 ) {
     match tab {
+        Tab::Triage if showing_unread && !leftovers.is_empty() => {
+            *selected = (*selected).min(leftovers.len() - 1);
+        }
         Tab::Triage if !groups.is_empty() => {
             *selected = (*selected).min(groups.len() - 1);
         }

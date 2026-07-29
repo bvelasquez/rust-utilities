@@ -14,6 +14,7 @@ pub fn render_triage(
     area: Rect,
     groups: &[PendingSenderGroup],
     leftovers: &[CachedMessage],
+    showing_unread: bool,
     pending_msgs: i64,
     selected: usize,
     table_state: &mut TableState,
@@ -34,13 +35,30 @@ pub fn render_triage(
     let content = chunks[1];
     let keys_area = chunks[2];
 
-    if !groups.is_empty() {
-        render_sender_groups(f, content, keys_area, groups, pending_msgs, selected, table_state);
+    if showing_unread && !leftovers.is_empty() {
+        render_leftovers(
+            f,
+            content,
+            keys_area,
+            leftovers,
+            selected,
+            table_state,
+            !groups.is_empty(),
+        );
         return;
     }
 
-    if !leftovers.is_empty() {
-        render_leftovers(f, content, keys_area, leftovers, selected, table_state);
+    if !groups.is_empty() {
+        render_sender_groups(
+            f,
+            content,
+            keys_area,
+            groups,
+            pending_msgs,
+            leftovers.len(),
+            selected,
+            table_state,
+        );
         return;
     }
 
@@ -67,14 +85,24 @@ fn render_sender_groups(
     keys_area: Rect,
     groups: &[PendingSenderGroup],
     pending_msgs: i64,
+    leftover_count: usize,
     selected: usize,
     table_state: &mut TableState,
 ) {
-    let title = format!(
-        "Triage — {} senders · {} unclassified msgs",
-        groups.len(),
-        pending_msgs
-    );
+    let title = if leftover_count > 0 {
+        format!(
+            "Triage — {} senders · {} unclassified · {} unread kept (u to open · M mark all)",
+            groups.len(),
+            pending_msgs,
+            leftover_count
+        )
+    } else {
+        format!(
+            "Triage — {} senders · {} unclassified msgs",
+            groups.len(),
+            pending_msgs
+        )
+    };
     let header = Row::new(vec![
         Cell::from("#"),
         Cell::from("Msgs"),
@@ -125,11 +153,19 @@ fn render_leftovers(
     leftovers: &[CachedMessage],
     selected: usize,
     table_state: &mut TableState,
+    can_switch_to_senders: bool,
 ) {
-    let title = format!(
-        "Unread — {} kept in inbox (Enter read · m mark read · M mark all)",
-        leftovers.len()
-    );
+    let title = if can_switch_to_senders {
+        format!(
+            "Unread — {} kept in inbox (Enter read · m mark · M mark all · u senders)",
+            leftovers.len()
+        )
+    } else {
+        format!(
+            "Unread — {} kept in inbox (Enter read · m mark read · M mark all)",
+            leftovers.len()
+        )
+    };
     let header = Row::new(vec![
         Cell::from("Action"),
         Cell::from("From"),
