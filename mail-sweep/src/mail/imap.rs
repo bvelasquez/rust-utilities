@@ -324,7 +324,7 @@ pub async fn apply_decisions(
                     d.target_folder.as_deref(),
                     &account.archive_folder,
                 );
-                match move_message(&mut session, &uid, &dest, timeout_secs).await {
+                match clear_message(&mut session, &uid, &dest, timeout_secs).await {
                     Ok(()) => ActionResult::ok_detail(
                         &d.account_id,
                         d.uid,
@@ -341,7 +341,7 @@ pub async fn apply_decisions(
                     d.target_folder.as_deref(),
                     &account.archive_folder,
                 );
-                match move_message(&mut session, &uid, &dest, timeout_secs).await {
+                match clear_message(&mut session, &uid, &dest, timeout_secs).await {
                     Ok(()) => ActionResult::ok_detail(
                         &d.account_id,
                         d.uid,
@@ -377,6 +377,10 @@ pub async fn apply_decisions(
                     ActionResult::err(&d.account_id, d.uid, "delete", "delete not allowed")
                 } else {
                     match async {
+                        // Mark read first so category unread counts clear even if
+                        // the message briefly lingers in Trash / All Mail.
+                        drain_uid_store(&mut session, &uid, "+FLAGS (\\Seen)", timeout_secs)
+                            .await?;
                         drain_uid_store(&mut session, &uid, "+FLAGS (\\Deleted)", timeout_secs)
                             .await?;
                         drain_expunge(&mut session, timeout_secs).await
@@ -502,6 +506,18 @@ pub fn resolve_mailbox(
         }
         _ => (archive_folder.to_string(), None),
     }
+}
+
+/// Mark \\Seen then move out of the inbox. Gmail category tabs (Promotions,
+/// Social, etc.) count unread across All Mail, so archive alone leaves badges.
+async fn clear_message(
+    session: &mut ImapSession,
+    uid: &str,
+    dest: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+    drain_uid_store(session, uid, "+FLAGS (\\Seen)", timeout_secs).await?;
+    move_message(session, uid, dest, timeout_secs).await
 }
 
 async fn move_message(

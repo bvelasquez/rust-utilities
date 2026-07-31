@@ -13,6 +13,7 @@ pub mod sync;
 use crate::cli::Cli;
 use crate::config::AppContext;
 
+#[derive(Clone)]
 pub struct CommandContext {
     pub app: AppContext,
     pub json: bool,

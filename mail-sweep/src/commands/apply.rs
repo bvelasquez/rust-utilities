@@ -242,11 +242,24 @@ pub async fn execute_apply_scoped(
                 .filter(|(_, r)| r.ok)
                 .map(|(d, _)| d.uid)
                 .collect();
+            let read_uids: Vec<u32> = account_decisions
+                .iter()
+                .zip(results.iter())
+                .filter(|(d, r)| r.ok && d.action.marks_read_on_apply())
+                .map(|(d, _)| d.uid)
+                .collect();
             for uid in &applied_uids {
                 applied_keys.insert((account.id.clone(), *uid));
             }
             if !applied_uids.is_empty() {
                 store.mark_messages_applied(&account.id, &applied_uids)?;
+            }
+            if !read_uids.is_empty() {
+                let items: Vec<(String, u32)> = read_uids
+                    .into_iter()
+                    .map(|uid| (account.id.clone(), uid))
+                    .collect();
+                store.mark_messages_read(&items)?;
             }
         }
         all_results.extend(results);

@@ -130,6 +130,7 @@ mail-sweep accounts add --id personal --email you@gmail.com --gmail --password '
 
 - Use an [App Password](https://support.google.com/accounts/answer/185833) (OAuth deferred to a later version).
 - Archive maps to `[Gmail]/All Mail` via IMAP MOVE when supported.
+- Archive / move / delete also set `\Seen` first. Gmail category tabs (Promotions, Social, Updates, Purchases) count unread across All Mail, so clearing without marking read leaves badges behind.
 
 ## Safety
 

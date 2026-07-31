@@ -2,6 +2,7 @@ mod actions;
 mod analytics;
 mod footer;
 mod help;
+mod jobs;
 mod keys;
 mod message_view;
 mod pattern_prompt;
@@ -29,8 +30,7 @@ use ratatui::widgets::{ListState, Paragraph, TableState, Tabs};
 use ratatui::Frame;
 use ratatui::Terminal;
 
-use crate::agent::rules_audit::{apply_audit_suggestions, audit_rules};
-use crate::agent::pattern_suggest::{sender_detail_input, suggest_patterns};
+use crate::agent::rules_audit::apply_audit_suggestions;
 use crate::agent::schema::RuleAuditPlan;
 use crate::commands::CommandContext;
 use crate::config::{save_config_file, RuleConfig};
@@ -41,6 +41,7 @@ use crate::store::{
     AnalyticsPeriod, AppliedAnalytics, CachedMessage, PendingSenderGroup, Store,
 };
 use footer::{Activity, render_footer};
+use jobs::{JobEvent, JobResult, JobRunner};
 use pattern_prompt::PatternEditFocus;
 use rule_overlays::{accepted_suggestions, SuggestItem};
 use rules_view::{
@@ -306,12 +307,17 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
     };
     let poll = auto_interval(ctx);
     let poll_label = poll_label(&poll);
+    let mut jobs = JobRunner::new();
 
     if let Ok(store) = Store::open(&ctx.app.db_path()) {
         store.reset_remaining_planned_if_no_pending_plan().ok();
     }
 
     loop {
+        while let Some(ev) = jobs.try_recv() {
+            apply_job_event(ctx, &mut state, &mut scroll, &mut jobs, &mut last_auto, ev);
+        }
+
         let store = Store::open(&ctx.app.db_path())?;
         let sender_groups = store.pending_sender_groups(SENDER_GROUP_LIMIT)?;
         let leftovers = store.unread_kept_messages(UNREAD_KEPT_LIMIT)?;
@@ -324,7 +330,15 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
         state.triage_focus = triage_focus;
         let showing_unread = triage_focus.showing_unread(&sender_groups, &leftovers);
 
-        if state.tab == Tab::Triage && pending > 0 && sender_groups.is_empty() {
+        if !jobs.is_busy()
+            && state.tab == Tab::Triage
+            && pending > 0
+            && sender_groups.is_empty()
+            && matches!(
+                state.activity,
+                Activity::Ready | Activity::AutoIdle | Activity::Success(_)
+            )
+        {
             state.activity =
                 Activity::Success(format!("{pending} msgs pending — press x for AI classify"));
         }
@@ -343,8 +357,12 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
 
         redraw(&mut terminal, ctx, &state, &mut scroll, &poll_label)?;
 
-        let timeout = if state.auto_on {
+        // Short poll while a job runs so keys stay responsive and we notice completion.
+        let timeout = if jobs.is_busy() {
+            Duration::from_millis(50)
+        } else if state.auto_on {
             poll.saturating_sub(last_auto.elapsed())
+                .min(Duration::from_millis(250))
         } else {
             Duration::from_millis(200)
         };
@@ -375,22 +393,15 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         &mut state,
                         &mut scroll,
                         &poll_label,
+                        &mut jobs,
                         key.code,
-                    )
-                    .await;
+                    );
                     continue;
                 }
                 if matches!(state.overlay, OverlayMode::PatternEdit { .. })
                     && is_ai_pattern_generate_key(key.code, key.modifiers)
                 {
-                    run_pattern_from_desc(
-                        &mut terminal,
-                        ctx,
-                        &mut state,
-                        &mut scroll,
-                        &poll_label,
-                    )
-                    .await;
+                    start_pattern_from_desc(ctx, &mut state, &mut jobs);
                     continue;
                 }
                 if !matches!(state.overlay, OverlayMode::None)
@@ -490,12 +501,10 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             ),
                         });
                     }
-                    KeyCode::Enter
-                        if state.tab == Tab::Triage
-                            && showing_unread
-                            && leftover_msg.is_some() =>
-                    {
-                        if let Some(message) = leftover_msg {
+                    KeyCode::Enter if state.tab == Tab::Triage => {
+                        // Unread leftovers or a sample from the selected sender group.
+                        let message = leftover_msg.or_else(|| sample_msg.clone());
+                        if let Some(message) = message {
                             state.overlay = OverlayMode::MessageRead {
                                 message,
                                 scroll: 0,
@@ -512,16 +521,21 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     }
                     KeyCode::Char('m') if state.tab == Tab::Triage => {
                         if let Some(msg) = leftover_msg.as_ref() {
-                            run_mark_read(
-                                &mut terminal,
+                            state.overlay = OverlayMode::None;
+                            match jobs::spawn_mark_read(
+                                &mut jobs,
                                 ctx,
-                                &mut state,
-                                &mut scroll,
-                                &poll_label,
-                                &msg.account_id,
+                                msg.account_id.clone(),
                                 msg.uid,
-                            )
-                            .await;
+                            ) {
+                                Ok(()) => {
+                                    state.activity = Activity::Busy(format!(
+                                        "Marking read · {} uid {}",
+                                        msg.account_id, msg.uid
+                                    ));
+                                }
+                                Err(msg) => state.activity = Activity::Success(msg),
+                            }
                         } else if !leftovers.is_empty() {
                             state.activity = Activity::Success(format!(
                                 "Press u for unread leftovers ({}), then m — or M to mark all",
@@ -537,14 +551,15 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                             state.activity =
                                 Activity::Success("No unread keep/flag mail to mark".into());
                         } else {
-                            run_mark_all_read(
-                                &mut terminal,
-                                ctx,
-                                &mut state,
-                                &mut scroll,
-                                &poll_label,
-                            )
-                            .await;
+                            state.overlay = OverlayMode::None;
+                            match jobs::spawn_mark_all_read(&mut jobs, ctx) {
+                                Ok(()) => {
+                                    state.activity = Activity::Busy(
+                                        "Marking all unread keep/flag mail read".into(),
+                                    );
+                                }
+                                Err(msg) => state.activity = Activity::Success(msg),
+                            }
                         }
                     }
                     KeyCode::Char('.') if state.tab == Tab::Triage => {
@@ -568,29 +583,35 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         }
                     }
                     KeyCode::Char('s') => {
-                        run_sync(&mut terminal, ctx, &mut state, &mut scroll, &poll_label).await;
+                        state.overlay = OverlayMode::None;
+                        match jobs::spawn_sync(&mut jobs, ctx) {
+                            Ok(()) => state.activity = Activity::Busy("Syncing mail".into()),
+                            Err(msg) => state.activity = Activity::Success(msg),
+                        }
                     }
                     KeyCode::Char('x') if state.tab == Tab::Triage => {
-                        run_classify(&mut terminal, ctx, &mut state, &mut scroll, &poll_label).await;
+                        state.overlay = OverlayMode::None;
+                        match jobs::spawn_classify(&mut jobs, ctx) {
+                            Ok(()) => state.activity = Activity::Busy("AI classifying".into()),
+                            Err(msg) => state.activity = Activity::Success(msg),
+                        }
                     }
                     KeyCode::Char('x') if state.tab == Tab::Rules => {
                         open_subsume_for_selected(&store, &rules, &mut state);
                     }
                     KeyCode::Char('X') if state.tab == Tab::Rules => {
-                        run_rules_audit(&mut terminal, ctx, &mut state, &mut scroll, &poll_label)
-                            .await;
+                        match jobs::spawn_rules_audit(&mut jobs, ctx) {
+                            Ok(()) => state.activity = Activity::Busy("Auditing rules".into()),
+                            Err(msg) => state.activity = Activity::Success(msg),
+                        }
                     }
                     KeyCode::Char('a')
                         if matches!(state.tab, Tab::Triage | Tab::Review) =>
                     {
-                        run_apply(
-                            &mut terminal,
-                            ctx,
-                            &mut state,
-                            &mut scroll,
-                            &poll_label,
-                        )
-                        .await;
+                        match jobs::spawn_apply(&mut jobs, ctx) {
+                            Ok(()) => state.activity = Activity::Applying,
+                            Err(msg) => state.activity = Activity::Success(msg),
+                        }
                     }
                     KeyCode::Char('r') if state.tab == Tab::Review => {
                         if let Some(msg) = teach_msg {
@@ -609,16 +630,22 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         }
                     }
                     KeyCode::Char('p') if state.tab == Tab::Triage && !sender_groups.is_empty() => {
-                        run_pattern_suggest(
-                            &mut terminal,
-                            ctx,
-                            &mut state,
-                            &mut scroll,
-                            &poll_label,
-                            &store,
-                            &sender_groups,
-                        )
-                        .await;
+                        if let Some(group) = sender_groups.get(state.selected) {
+                            match jobs::spawn_pattern_suggest(
+                                &mut jobs,
+                                ctx,
+                                group.from_address.clone(),
+                                group.account_id.clone(),
+                            ) {
+                                Ok(()) => {
+                                    state.activity = Activity::Busy(format!(
+                                        "Suggesting patterns · {}",
+                                        group.from_address
+                                    ));
+                                }
+                                Err(msg) => state.activity = Activity::Success(msg),
+                            }
+                        }
                     }
                     KeyCode::Char('z') if matches!(state.tab, Tab::Triage | Tab::Review) => {
                         if let Some(msg) = teach_msg {
@@ -866,16 +893,14 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                     _ => {}
                 }
             }
-        } else if state.auto_on {
-            run_auto_cycle(
-                &mut terminal,
-                ctx,
-                &mut state,
-                &mut scroll,
-                &poll_label,
-                &mut last_auto,
-            )
-            .await;
+        } else if state.auto_on && !jobs.is_busy() && last_auto.elapsed() >= poll {
+            match jobs::spawn_auto(&mut jobs, ctx) {
+                Ok(()) => {
+                    state.overlay = OverlayMode::None;
+                    state.activity = Activity::Busy("AUTO sync".into());
+                }
+                Err(msg) => state.activity = Activity::Success(msg),
+            }
         }
     }
 
@@ -1145,13 +1170,7 @@ fn is_ai_pattern_generate_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
     )
 }
 
-async fn run_pattern_from_desc(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-) {
+fn start_pattern_from_desc(ctx: &CommandContext, state: &mut LoopState, jobs: &mut JobRunner) {
     let OverlayMode::PatternEdit { buffer, desc, focus, .. } = &state.overlay else {
         return;
     };
@@ -1165,35 +1184,9 @@ async fn run_pattern_from_desc(
     let current = buffer.clone();
     let _ = focus;
 
-    state.activity = Activity::Busy("Generating pattern".into());
-    let _ = redraw(terminal, ctx, state, scroll, poll_label);
-    let result = crate::agent::pattern_from_desc::pattern_from_description(
-        &ctx.app,
-        &description,
-        if current.trim().is_empty() {
-            None
-        } else {
-            Some(current.as_str())
-        },
-    )
-    .await;
-
-    match result {
-        Ok(pattern) => {
-            if let OverlayMode::PatternEdit {
-                buffer,
-                focus,
-                ..
-            } = &mut state.overlay
-            {
-                *buffer = pattern.clone();
-                *focus = PatternEditFocus::Pattern;
-            }
-            state.activity = Activity::Success(format!("AI filled pattern: {pattern}"));
-        }
-        Err(e) => {
-            state.activity = Activity::Error(format!("Pattern AI failed: {e}"));
-        }
+    match jobs::spawn_pattern_from_desc(jobs, ctx, description, current) {
+        Ok(()) => state.activity = Activity::Busy("Generating pattern".into()),
+        Err(msg) => state.activity = Activity::Success(msg),
     }
 }
 
@@ -1309,64 +1302,13 @@ fn run_teach_with_busy<F>(
     apply_teach_activity(&mut state.activity, op(ctx), label);
 }
 
-async fn run_mark_read(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-    account_id: &str,
-    uid: u32,
-) {
-    // Drop covering overlays so the footer status is visible.
-    state.overlay = OverlayMode::None;
-    show_busy(
-        terminal,
-        ctx,
-        state,
-        scroll,
-        poll_label,
-        &format!("Marking read · {account_id} uid {uid}"),
-    );
-    let result = actions::do_mark_read(ctx, account_id, uid).await;
-    match result {
-        Ok(msg) => state.activity = Activity::Success(msg),
-        Err(e) => state.activity = Activity::Error(format!("Mark read failed: {e}")),
-    }
-}
-
-async fn run_mark_all_read(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-) {
-    state.overlay = OverlayMode::None;
-    show_busy(
-        terminal,
-        ctx,
-        state,
-        scroll,
-        poll_label,
-        "Marking all unread keep/flag mail read",
-    );
-    let result = actions::do_mark_all_read(ctx, UNREAD_KEPT_LIMIT).await;
-    match result {
-        Ok(msg) => {
-            state.selected = 0;
-            state.activity = Activity::Success(msg);
-        }
-        Err(e) => state.activity = Activity::Error(format!("Mark all read failed: {e}")),
-    }
-}
-
-async fn handle_message_read_key(
+fn handle_message_read_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ctx: &mut CommandContext,
     state: &mut LoopState,
     scroll: &mut ScrollStates,
     poll_label: &str,
+    jobs: &mut JobRunner,
     code: KeyCode,
 ) {
     let OverlayMode::MessageRead { message, scroll: body_scroll } = &state.overlay else {
@@ -1393,10 +1335,24 @@ async fn handle_message_read_key(
         }
         KeyCode::Char('m') => {
             let _ = body_scroll;
-            run_mark_read(terminal, ctx, state, scroll, poll_label, &account_id, uid).await;
+            state.overlay = OverlayMode::None;
+            match jobs::spawn_mark_read(jobs, ctx, account_id.clone(), uid) {
+                Ok(()) => {
+                    state.activity =
+                        Activity::Busy(format!("Marking read · {account_id} uid {uid}"));
+                }
+                Err(msg) => state.activity = Activity::Success(msg),
+            }
         }
         KeyCode::Char('M') => {
-            run_mark_all_read(terminal, ctx, state, scroll, poll_label).await;
+            state.overlay = OverlayMode::None;
+            match jobs::spawn_mark_all_read(jobs, ctx) {
+                Ok(()) => {
+                    state.activity =
+                        Activity::Busy("Marking all unread keep/flag mail read".into());
+                }
+                Err(msg) => state.activity = Activity::Success(msg),
+            }
         }
         KeyCode::Char('z') => {
             state.overlay = OverlayMode::None;
@@ -1525,104 +1481,129 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-async fn run_sync(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-) {
-    state.overlay = OverlayMode::None;
-    show_busy(terminal, ctx, state, scroll, poll_label, "Syncing mail");
-    let result = actions::do_sync(ctx).await;
-    match result {
-        Ok(msg) => {
-            let hint = if ctx.app.config.rules.is_empty() {
-                String::new()
-            } else {
-                " · press x to classify new mail against rules".into()
-            };
-            state.activity = Activity::Success(format!("{msg}{hint}"));
-        }
-        Err(e) => state.activity = Activity::Error(format!("Sync failed: {e}")),
-    }
-}
-
-async fn run_classify(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+fn apply_job_event(
     ctx: &mut CommandContext,
     state: &mut LoopState,
     scroll: &mut ScrollStates,
-    poll_label: &str,
-) {
-    state.overlay = OverlayMode::None;
-    show_busy(terminal, ctx, state, scroll, poll_label, "AI classifying");
-    let result = actions::do_classify(ctx).await;
-    match result {
-        Ok(msg) => state.activity = Activity::Success(msg),
-        Err(e) => state.activity = Activity::Error(format!("Classify failed: {e}")),
-    }
-}
-
-async fn run_apply(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-) {
-    state.activity = Activity::Applying;
-    let _ = redraw(terminal, ctx, state, scroll, poll_label);
-
-    let result = actions::do_apply(ctx, None).await;
-
-    match result {
-        Ok(msg) => state.activity = Activity::Success(msg),
-        Err(e) => state.activity = Activity::Error(format!("Apply failed: {e}")),
-    }
-}
-
-async fn run_auto_cycle(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &mut CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
+    jobs: &mut JobRunner,
     last_auto: &mut Instant,
+    ev: JobEvent,
 ) {
-    state.overlay = OverlayMode::None;
-    show_busy(terminal, ctx, state, scroll, poll_label, "AUTO sync");
-    let sync_result = actions::do_sync(ctx).await;
-
-    show_busy(terminal, ctx, state, scroll, poll_label, "AUTO classify");
-    let classify_result = actions::do_classify(ctx).await;
-
-    let apply_result: Result<Option<String>, anyhow::Error> = async {
-        let store = Store::open(&ctx.app.db_path())?;
-        if store.latest_pending_plan()?.is_none() {
-            return Ok(None);
+    match ev {
+        JobEvent::Progress(label) => {
+            state.activity = Activity::Busy(label);
         }
-        show_busy(terminal, ctx, state, scroll, poll_label, "AUTO apply");
-        let summary = actions::do_apply_auto(ctx).await?;
-        Ok(Some(summary))
-    }
-    .await;
-
-    state.activity = match (sync_result, classify_result, apply_result) {
-        (Err(e), _, _) => Activity::Error(format!("Auto sync failed: {e}")),
-        (_, Err(e), _) => Activity::Error(format!("Auto classify failed: {e}")),
-        (_, _, Err(e)) => Activity::Error(format!("Auto apply failed: {e}")),
-        (Ok(sync), Ok(classify), Ok(apply)) => {
-            let apply_msg = apply.unwrap_or_else(|| "no plan to apply".into());
-            Activity::Success(format!("AUTO: {sync} · {classify} · {apply_msg}"))
+        JobEvent::Done(result) => {
+            jobs.clear_inflight();
+            match result {
+                JobResult::Sync { result, has_rules } => match result {
+                    Ok(msg) => {
+                        let hint = if has_rules {
+                            " · press x to classify new mail against rules"
+                        } else {
+                            ""
+                        };
+                        state.activity = Activity::Success(format!("{msg}{hint}"));
+                    }
+                    Err(e) => state.activity = Activity::Error(format!("Sync failed: {e}")),
+                },
+                JobResult::Classify(result) => {
+                    let _ = ctx.app.reload_config();
+                    match result {
+                        Ok(msg) => state.activity = Activity::Success(msg),
+                        Err(e) => {
+                            state.activity = Activity::Error(format!("Classify failed: {e}"))
+                        }
+                    }
+                }
+                JobResult::Apply(result) => match result {
+                    Ok(msg) => state.activity = Activity::Success(msg),
+                    Err(e) => state.activity = Activity::Error(format!("Apply failed: {e}")),
+                },
+                JobResult::Auto(result) => {
+                    let _ = ctx.app.reload_config();
+                    *last_auto = Instant::now();
+                    match result {
+                        Ok(msg) => {
+                            if state.auto_on {
+                                state.activity = Activity::AutoIdle;
+                            } else {
+                                state.activity = Activity::Success(msg);
+                            }
+                        }
+                        Err(e) => state.activity = Activity::Error(e),
+                    }
+                }
+                JobResult::MarkRead(result) => match result {
+                    Ok(msg) => state.activity = Activity::Success(msg),
+                    Err(e) => {
+                        state.activity = Activity::Error(format!("Mark read failed: {e}"))
+                    }
+                },
+                JobResult::MarkAllRead(result) => match result {
+                    Ok(msg) => {
+                        state.selected = 0;
+                        state.activity = Activity::Success(msg);
+                    }
+                    Err(e) => {
+                        state.activity = Activity::Error(format!("Mark all read failed: {e}"))
+                    }
+                },
+                JobResult::RulesAudit(result) => match result {
+                    Ok(plan) => {
+                        if plan.suggestions.is_empty() {
+                            state.activity = Activity::Success(plan.summary);
+                        } else {
+                            scroll.audit_list = ListState::default();
+                            state.overlay = OverlayMode::RuleAudit {
+                                selected: 0,
+                                // Never pre-accept — mass-retire + Enter used to wipe rules.
+                                accepted: Vec::new(),
+                                plan,
+                            };
+                            state.activity =
+                                Activity::Success("Review audit suggestions".into());
+                        }
+                    }
+                    Err(e) => state.activity = Activity::Error(format!("Audit failed: {e}")),
+                },
+                JobResult::PatternSuggest(result) => match result {
+                    Ok((items, summary)) => {
+                        if items.is_empty() {
+                            state.activity = Activity::Success(summary);
+                        } else {
+                            scroll.suggest_list = ListState::default();
+                            state.overlay = OverlayMode::PatternSuggest {
+                                items,
+                                selected: 0,
+                            };
+                            state.activity =
+                                Activity::Success("Pick a suggested pattern".into());
+                        }
+                    }
+                    Err(e) => {
+                        state.activity = Activity::Error(format!("Suggest failed: {e}"))
+                    }
+                },
+                JobResult::PatternFromDesc(result) => match result {
+                    Ok(pattern) => {
+                        if let OverlayMode::PatternEdit {
+                            buffer, focus, ..
+                        } = &mut state.overlay
+                        {
+                            *buffer = pattern.clone();
+                            *focus = PatternEditFocus::Pattern;
+                        }
+                        state.activity =
+                            Activity::Success(format!("AI filled pattern: {pattern}"));
+                    }
+                    Err(e) => {
+                        state.activity = Activity::Error(format!("Pattern AI failed: {e}"))
+                    }
+                },
+            }
         }
-    };
-
-    if state.auto_on {
-        state.activity = Activity::AutoIdle;
     }
-
-    *last_auto = Instant::now();
 }
 
 fn clamp_selection(
@@ -1679,101 +1660,6 @@ fn apply_teach_activity(activity: &mut Activity, result: Result<TeachReport>, la
             *activity = Activity::Success(msg);
         }
         Err(e) => *activity = Activity::Error(format!("{label} error: {e}")),
-    }
-}
-
-async fn run_rules_audit(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-) {
-    show_busy(terminal, ctx, state, scroll, poll_label, "Auditing rules");
-    let result = async {
-        let store = Store::open(&ctx.app.db_path())?;
-        audit_rules(&ctx.app, &ctx.app.config.rules, &store).await
-    }
-    .await;
-
-    match result {
-        Ok(plan) => {
-            if plan.suggestions.is_empty() {
-                state.activity = Activity::Success(plan.summary);
-            } else {
-                scroll.audit_list = ListState::default();
-                state.overlay = OverlayMode::RuleAudit {
-                    selected: 0,
-                    // Never pre-accept — a mass-retire suggestion + Enter used to wipe rules.
-                    accepted: Vec::new(),
-                    plan,
-                };
-                state.activity = Activity::Success("Review audit suggestions".into());
-            }
-        }
-        Err(e) => state.activity = Activity::Error(format!("Audit failed: {e}")),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_pattern_suggest(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ctx: &CommandContext,
-    state: &mut LoopState,
-    scroll: &mut ScrollStates,
-    poll_label: &str,
-    store: &Store,
-    groups: &[PendingSenderGroup],
-) {
-    let Some(group) = groups.get(state.selected) else {
-        return;
-    };
-    let from = group.from_address.clone();
-    let account_id = group.account_id.clone();
-    show_busy(
-        terminal,
-        ctx,
-        state,
-        scroll,
-        poll_label,
-        &format!("Suggesting patterns · {from}"),
-    );
-    let result = async {
-        let messages = store.messages_for_sender(&from, Some(&account_id), 50)?;
-        let detail = sender_detail_input(&from, &messages);
-        let plan = suggest_patterns(&ctx.app, &detail).await?;
-        let items: Vec<SuggestItem> = plan
-            .patterns
-            .into_iter()
-            .map(|p| {
-                let match_count = store
-                    .messages_matching_pattern(&p.match_pattern, 5000, usize::MAX)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                SuggestItem {
-                    pattern: p,
-                    match_count,
-                }
-            })
-            .collect();
-        Ok::<_, anyhow::Error>((items, plan.summary))
-    }
-    .await;
-
-    match result {
-        Ok((items, summary)) => {
-            if items.is_empty() {
-                state.activity = Activity::Success(summary);
-            } else {
-                scroll.suggest_list = ListState::default();
-                state.overlay = OverlayMode::PatternSuggest {
-                    items,
-                    selected: 0,
-                };
-                state.activity = Activity::Success("Pick a suggested pattern".into());
-            }
-        }
-        Err(e) => state.activity = Activity::Error(format!("Suggest failed: {e}")),
     }
 }
 

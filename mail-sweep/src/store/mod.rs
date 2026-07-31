@@ -168,6 +168,8 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        // WAL + busy timeout so the TUI can keep reading while background sync/apply write.
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
         let store = Self { conn };
         store.migrate()?;
         Ok(store)

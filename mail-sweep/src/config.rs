@@ -185,6 +185,7 @@ pub struct AppConfig {
     pub rules: Vec<RuleConfig>,
 }
 
+#[derive(Clone)]
 pub struct AppContext {
     pub config_path: PathBuf,
     pub secrets_path: PathBuf,

@@ -93,6 +93,15 @@ impl MailAction {
     pub fn is_auto_safe(&self) -> bool {
         !self.is_destructive()
     }
+
+    /// Clearing actions should set \\Seen so Gmail category tabs (Promotions,
+    /// Social, Updates, Purchases) do not keep unread badges after archive/move/delete.
+    pub fn marks_read_on_apply(&self) -> bool {
+        matches!(
+            self,
+            Self::Archive | Self::Move | Self::Delete | Self::MarkRead
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,4 +230,20 @@ pub struct RuleAuditSuggestion {
 pub struct RuleAuditPlan {
     pub suggestions: Vec<RuleAuditSuggestion>,
     pub summary: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MailAction;
+
+    #[test]
+    fn clearing_actions_mark_read_on_apply() {
+        assert!(MailAction::Archive.marks_read_on_apply());
+        assert!(MailAction::Move.marks_read_on_apply());
+        assert!(MailAction::Delete.marks_read_on_apply());
+        assert!(MailAction::MarkRead.marks_read_on_apply());
+        assert!(!MailAction::Keep.marks_read_on_apply());
+        assert!(!MailAction::Flag.marks_read_on_apply());
+        assert!(!MailAction::Tag.marks_read_on_apply());
+    }
 }

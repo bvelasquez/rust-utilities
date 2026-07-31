@@ -91,14 +91,14 @@ fn render_sender_groups(
 ) {
     let title = if leftover_count > 0 {
         format!(
-            "Triage — {} senders · {} unclassified · {} unread kept (u to open · M mark all)",
+            "Triage — {} senders · {} unclassified · {} unread kept (Enter read · u leftovers · M mark all)",
             groups.len(),
             pending_msgs,
             leftover_count
         )
     } else {
         format!(
-            "Triage — {} senders · {} unclassified msgs",
+            "Triage — {} senders · {} unclassified (Enter read sample)",
             groups.len(),
             pending_msgs
         )
