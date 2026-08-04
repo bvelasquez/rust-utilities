@@ -1,0 +1,91 @@
+# Copy to your user config via: soki-ci config init
+# macOS: ~/Library/Application Support/com.soki-ci.soki-ci/projects.yaml
+# Linux: ~/.config/soki-ci/projects.yaml
+
+version: 1
+
+defaults:
+  projects_dir: ~/projects
+  max_parallel: 4
+  speak:
+    enabled: true
+    voice: Leda
+    base_url: http://127.0.0.1:8787
+    on: [success, error]
+
+projects:
+  - id: simple-food-track
+    name: Simple Food Track
+    path: "${projects_dir}/simple-health/simple-food-track"
+    package_manager: pnpm
+    targets:
+      hosting:
+        label: Firebase Hosting
+        runner:
+          kind: pnpm_script
+          script: deploy:hosting
+      functions:
+        runner:
+          kind: pnpm_script
+          script: deploy:functions
+      testflight:
+        label: iOS TestFlight
+        runner:
+          kind: pnpm_script
+          script: mobile:testflight
+
+  - id: simple-workout
+    name: Simple Workout
+    path: "${projects_dir}/simple-health/simple-workout"
+    package_manager: pnpm
+    targets:
+      hosting:
+        runner: { kind: pnpm_script, script: deploy:hosting }
+      functions:
+        runner: { kind: pnpm_script, script: deploy:functions }
+      testflight:
+        runner: { kind: pnpm_script, script: mobile:testflight }
+
+  - id: simple-timer
+    name: Simple Timer
+    path: "${projects_dir}/simple-health/simple-timer"
+    package_manager: npm
+    targets:
+      hosting:
+        runner: { kind: npm_script, script: deploy:hosting }
+      functions:
+        runner: { kind: npm_script, script: deploy:functions }
+      testflight:
+        runner: { kind: npm_script, script: mobile:testflight }
+
+  - id: morsezapp
+    name: MorseZapp
+    path: "${projects_dir}/morsezapp"
+    package_manager: npm
+    targets:
+      hosting:
+        runner: { kind: npm_script, script: deploy:hosting }
+      functions:
+        runner: { kind: npm_script, script: deploy:functions }
+      testflight:
+        runner: { kind: npm_script, script: mobile:testflight }
+
+  - id: mighty45
+    name: Mighty45 Client
+    path: "${projects_dir}/mighty45-web/apps/mighty45-client/Mighty45Client"
+    package_manager: npm
+    targets:
+      testflight:
+        runner: { kind: npm_script, script: mobile:testflight }
+
+  - id: simple-log
+    name: Simple Log
+    path: "${projects_dir}/SimpleLog3"
+    package_manager: pnpm
+    targets:
+      hosting:
+        runner: { kind: pnpm_script, script: deploy:hosting }
+      functions:
+        runner: { kind: pnpm_script, script: deploy:functions }
+      testflight:
+        runner: { kind: pnpm_script, script: mobile:testflight }

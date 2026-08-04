@@ -1,0 +1,41 @@
+[package]
+name = "soki-ci"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-first multi-project deploy control panel — parallel Firebase/mobile deploys with TUI and broker TTS"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/bvelasquez/rust-utilities"
+homepage = "https://github.com/bvelasquez/rust-utilities/tree/main/soki-ci"
+keywords = ["cli", "deploy", "tui", "firebase", "ci"]
+categories = ["command-line-utilities"]
+include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE", "projects.example.yaml"]
+
+[lib]
+name = "soki_ci"
+path = "src/lib.rs"
+
+[[bin]]
+name = "soki-ci"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+dirs = "5"
+directories = "5"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "io-util", "sync", "fs"] }
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
