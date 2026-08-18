@@ -1,0 +1,46 @@
+# Copy to your user config via: pi-commander config init
+# macOS: ~/Library/Application Support/pi-commander/projects.yaml
+# Linux: ~/.config/pi-commander/projects.yaml
+
+version: 1
+
+defaults:
+  projects_dir: ~/projects
+  agents_per_project: 1
+  pi: pi
+  auto_restart: true
+  max_restarts: 3
+  speak:
+    enabled: true
+    voice: Leda
+    base_url: http://127.0.0.1:8787
+    on: [routed, idle, error]
+  telegram:
+    enabled: false
+    bot_token: ""          # or env TELEGRAM_BOT_TOKEN
+    chat_id: ""            # or env TELEGRAM_CHAT_ID
+    inbound: true
+    notify: [routed, idle, error]
+  api:
+    bind: 127.0.0.1:9851
+    token: ""              # or env PI_COMMANDER_API_TOKEN (require when binding off loopback)
+
+projects:
+  - id: simple-workout
+    name: Simple Workout
+    path: "${projects_dir}/simple-health/simple-workout"
+    agents: 1
+    # model: anthropic/claude-sonnet-4
+
+  - id: paperdoll
+    name: PaperDoll
+    path: "${projects_dir}/paperdoll"
+    agents: 1
+
+  # multiple agents in one project (parallel workers):
+  # - id: mighty45-web
+  #   name: Mighty45 Web
+  #   path: "${projects_dir}/mighty45-web"
+  #   agents: 2
+  #   env:
+  #     PI_MODE: worker

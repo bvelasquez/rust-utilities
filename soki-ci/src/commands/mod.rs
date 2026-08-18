@@ -11,6 +11,7 @@ pub mod config_cmd;
 pub mod deploy;
 pub mod jobs_cmd;
 pub mod projects;
+pub mod serve;
 
 pub struct AppContext {
     pub config_path: PathBuf,

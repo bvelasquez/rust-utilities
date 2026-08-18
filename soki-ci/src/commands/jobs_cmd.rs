@@ -53,6 +53,21 @@ pub fn run_logs(ctx: &AppContext, id: &str, tail: usize, json: bool) -> Result<(
     Ok(())
 }
 
+pub fn run_reset(ctx: &AppContext, yes: bool, json: bool) -> Result<()> {
+    require_yes(yes, "reset job history")?;
+    let removed = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(ctx.jobs.clear_history())
+    })?;
+    let data = json!({ "removed": removed });
+    if json {
+        Envelope::ok("jobs reset", data).print_json()?;
+    } else {
+        println!("cleared {removed} finished deployment(s)");
+    }
+    Ok(())
+}
+
 pub fn run_cancel(ctx: &AppContext, id: &str, yes: bool, json: bool) -> Result<()> {
     require_yes(yes, "cancel job")?;
     let uuid = Uuid::parse_str(id)?;

@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
+use crate::mail::credentials::MailCredentials;
+use crate::mail::google_oauth;
 use crate::secrets::{load_dotenv_secrets, SecretsFile};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -120,6 +122,14 @@ fn default_plan_min_confidence() -> f32 {
     0.55
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountAuthMethod {
+    #[default]
+    Password,
+    GoogleOauth,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountConfig {
     pub id: String,
@@ -132,6 +142,8 @@ pub struct AccountConfig {
     pub smtp_port: u16,
     /// Optional inline password in config.toml (prefer secrets.toml or .env)
     pub password: Option<String>,
+    #[serde(default)]
+    pub auth: AccountAuthMethod,
     #[serde(default = "default_inbox")]
     pub inbox_folder: String,
     #[serde(default = "default_archive_folder")]
@@ -274,6 +286,13 @@ impl AppContext {
     }
 
     pub fn resolve_password(&self, account: &AccountConfig) -> Result<String> {
+        if account.auth == AccountAuthMethod::GoogleOauth {
+            anyhow::bail!(
+                "account '{}' uses Google OAuth — run `mail-sweep accounts google-login --id {}`",
+                account.id,
+                account.id
+            );
+        }
         if let Some(p) = &account.password {
             if !p.is_empty() {
                 return Ok(p.clone());
@@ -289,6 +308,32 @@ impl AppContext {
             account.id,
             account.id
         )
+    }
+
+    pub async fn resolve_mail_credentials(
+        &self,
+        account: &AccountConfig,
+    ) -> Result<MailCredentials> {
+        match account.auth {
+            AccountAuthMethod::Password => {
+                Ok(MailCredentials::password(self.resolve_password(account)?))
+            }
+            AccountAuthMethod::GoogleOauth => {
+                let token = google_oauth::access_token_for_account(self, &account.id).await?;
+                Ok(MailCredentials::oauth(token))
+            }
+        }
+    }
+
+    pub fn account_auth_ready(&self, account: &AccountConfig) -> bool {
+        match account.auth {
+            AccountAuthMethod::Password => self.resolve_password(account).is_ok(),
+            AccountAuthMethod::GoogleOauth => self
+                .secrets
+                .google_oauth_tokens
+                .get(&account.id)
+                .is_some_and(|t| !t.refresh_token.is_empty()),
+        }
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -315,6 +360,12 @@ impl AppContext {
         self.save_secrets()
     }
 
+    pub fn set_google_oauth_client(&mut self, client_id: String, client_secret: String) -> Result<()> {
+        self.secrets.google_oauth_client_id = Some(client_id);
+        self.secrets.google_oauth_client_secret = Some(client_secret);
+        self.save_secrets()
+    }
+
     pub fn set_account_password(&mut self, account_id: &str, password: String) -> Result<()> {
         if !self
             .config
@@ -337,13 +388,15 @@ impl AppContext {
         SecretsStatus {
             openrouter_key_set: self.config.llm.openrouter_api_key.is_some(),
             llm_model: self.config.llm.model.clone(),
+            google_oauth_client_set: crate::mail::google_oauth::google_oauth_configured(&self.secrets),
             accounts: self
                 .config
                 .accounts
                 .iter()
                 .map(|a| AccountSecretStatus {
                     id: a.id.clone(),
-                    password_set: self.resolve_password(a).is_ok(),
+                    auth: a.auth,
+                    password_set: self.account_auth_ready(a),
                 })
                 .collect(),
         }
@@ -354,12 +407,14 @@ impl AppContext {
 pub struct SecretsStatus {
     pub openrouter_key_set: bool,
     pub llm_model: Option<String>,
+    pub google_oauth_client_set: bool,
     pub accounts: Vec<AccountSecretStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountSecretStatus {
     pub id: String,
+    pub auth: AccountAuthMethod,
     pub password_set: bool,
 }
 
@@ -400,7 +455,7 @@ pub fn save_config_file(path: &PathBuf, config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn gmail_account(id: &str, email: &str) -> AccountConfig {
+pub fn gmail_account(id: &str, email: &str, auth: AccountAuthMethod) -> AccountConfig {
     AccountConfig {
         id: id.into(),
         email: email.into(),
@@ -409,6 +464,7 @@ pub fn gmail_account(id: &str, email: &str) -> AccountConfig {
         smtp_host: "smtp.gmail.com".into(),
         smtp_port: 587,
         password: None,
+        auth,
         inbox_folder: "INBOX".into(),
         archive_folder: "[Gmail]/All Mail".into(),
         spam_folder: "[Gmail]/Spam".into(),
@@ -425,6 +481,7 @@ pub fn icloud_account(id: &str, email: &str) -> AccountConfig {
         smtp_host: "smtp.mail.me.com".into(),
         smtp_port: 587,
         password: None,
+        auth: AccountAuthMethod::Password,
         inbox_folder: "INBOX".into(),
         archive_folder: "Archive".into(),
         spam_folder: "Junk".into(),

@@ -16,6 +16,7 @@ pub fn capabilities_json() -> serde_json::Value {
             { "id": "accounts list", "mutation": false, "requiresAuth": false },
             { "id": "accounts add", "mutation": true, "requiresAuth": false },
             { "id": "accounts test", "mutation": false, "requiresAuth": true },
+            { "id": "accounts google-login", "mutation": true, "requiresAuth": false, "description": "Sign in with Google for Gmail (OAuth browser flow)" },
             { "id": "secrets list", "mutation": false, "requiresAuth": false },
             { "id": "secrets set openrouter-key", "mutation": true, "requiresAuth": false },
             { "id": "secrets set account", "mutation": true, "requiresAuth": false },
@@ -41,6 +42,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "Run `mail-sweep capabilities --json` and `mail-sweep config schema --json` before automation",
             "Configure accounts in ~/.config/mail-sweep/config.toml",
             "Store API keys and passwords with `mail-sweep secrets set ...` or secrets.toml / .env",
+            "Gmail: app password or Sign in with Google (`accounts add --gmail --google-oauth` then `accounts google-login`)",
             "Use `mail-sweep sync --json` then `mail-sweep process --dry-run --json` before `apply --yes --json`",
             "IMAP reads/syncs; SMTP sends. Both configured per account.",
             "Mutations require `--yes` or `--dry-run` when stdout is not a TTY",
@@ -76,7 +78,10 @@ pub fn config_schema_json() -> serde_json::Value {
             "fields": {
                 "openrouter_api_key": "OpenRouter API key for classification",
                 "llm_model": "Default OpenRouter model",
-                "accounts.<id>": "Per-account IMAP/SMTP password"
+                "accounts.<id>": "Per-account IMAP/SMTP password (password auth)",
+                "google_oauth_client_id": "Google Cloud OAuth client id (Desktop app)",
+                "google_oauth_client_secret": "Google Cloud OAuth client secret",
+                "google_oauth_tokens.<id>": "Per-account Google refresh/access tokens (google_oauth auth)"
             },
             "example": {
                 "openrouter_api_key": "sk-or-v1-...",
@@ -97,6 +102,9 @@ pub fn config_schema_json() -> serde_json::Value {
             "mail-sweep secrets set-openrouter-key --key <key>",
             "mail-sweep secrets set-llm-model --model <model>",
             "mail-sweep secrets set-account --id <id> --password <pass>",
+            "mail-sweep secrets set-google-oauth --client-id <id> --client-secret <secret>",
+            "mail-sweep accounts add --id <id> --email <email> --gmail --google-oauth",
+            "mail-sweep accounts google-login --id <id>",
             "mail-sweep accounts add --id <id> --email <email> --password <pass> --gmail",
             "mail-sweep accounts add --id <id> --email <email> --icloud  # iCloud needs app-specific password",
         ]

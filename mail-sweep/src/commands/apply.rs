@@ -194,7 +194,7 @@ pub async fn execute_apply_scoped(
             continue;
         }
 
-        let password = match ctx.app.resolve_password(account) {
+        let credentials = match ctx.app.resolve_mail_credentials(account).await {
             Ok(p) => p,
             Err(e) => {
                 aborted = Some(format!("account {}: {e}", account.id));
@@ -209,7 +209,7 @@ pub async fn execute_apply_scoped(
         let timeout_secs = ctx.app.config.sync.imap_timeout_secs;
         let results = match imap::apply_decisions(
             account,
-            &password,
+            &credentials,
             &account_decisions,
             allow_delete,
             dry_run,

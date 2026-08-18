@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use async_imap::Authenticator;
 use async_imap::types::{Capability, Fetch};
 use async_imap::Session;
-use async_native_tls::{TlsConnector, TlsStream};
-use async_std::net::TcpStream;
+use tokio::net::TcpStream;
+use tokio_native_tls::{TlsConnector, TlsStream};
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -11,7 +12,29 @@ use std::time::Duration;
 
 use crate::agent::schema::{MailAction, MessageDecision};
 use crate::config::AccountConfig;
+use crate::mail::credentials::MailCredentials;
+use crate::mail::google_oauth::xoauth2_initial_response;
 use crate::mail::parser::{self, ParsedMail};
+
+struct Xoauth2 {
+    response: String,
+}
+
+impl Authenticator for Xoauth2 {
+    type Response = String;
+
+    fn process(&mut self, challenge: &[u8]) -> Self::Response {
+        if !challenge.is_empty() {
+            let text = String::from_utf8_lossy(challenge);
+            if text.contains("\"status\":\"401\"") || text.contains("invalid_token") {
+                eprintln!(
+                    "XOAUTH2 rejected: {text} — enable IMAP in Gmail settings and ensure the account is a test user for your OAuth app"
+                );
+            }
+        }
+        self.response.clone()
+    }
+}
 
 pub type ImapSession = Session<TlsStream<TcpStream>>;
 
@@ -44,7 +67,7 @@ pub struct AccountTestResult {
 
 pub async fn connect(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     timeout_secs: u64,
 ) -> Result<ImapSession> {
     let addr = format!("{}:{}", account.imap_host, account.imap_port);
@@ -55,7 +78,11 @@ pub async fn connect(
     })
     .await??;
 
-    let tls = TlsConnector::new();
+    let tls = TlsConnector::from(
+        native_tls::TlsConnector::builder()
+            .build()
+            .context("build TLS connector")?,
+    );
     let domain = account.imap_host.as_str();
     let tls_stream = imap_timeout(timeout_secs, &format!("TLS handshake with {domain}"), async {
         tls.connect(domain, tcp)
@@ -64,13 +91,28 @@ pub async fn connect(
     })
     .await??;
 
-    let client = async_imap::Client::new(tls_stream);
+    let mut client = async_imap::Client::new(tls_stream);
+    imap_timeout(timeout_secs, "read IMAP greeting", client.read_response())
+        .await??
+        .context("IMAP server greeting")?;
+
     let session = imap_timeout(timeout_secs, &format!("login for {}", account.email), async {
-        client
-            .login(&account.email, password)
-            .await
-            .map_err(|(e, _)| e)
-            .with_context(|| format!("IMAP login for {}", account.email))
+        match credentials {
+            MailCredentials::Password(password) => client
+                .login(&account.email, password.as_str())
+                .await
+                .map_err(|(e, _)| e)
+                .with_context(|| format!("IMAP login for {}", account.email)),
+            MailCredentials::OAuthAccessToken(token) => {
+                let response = xoauth2_initial_response(&account.email, token);
+                let auth = Xoauth2 { response };
+                client
+                    .authenticate("XOAUTH2", auth)
+                    .await
+                    .map_err(|(e, _)| e)
+                    .with_context(|| format!("IMAP XOAUTH2 for {}", account.email))
+            }
+        }
     })
     .await??;
 
@@ -79,10 +121,10 @@ pub async fn connect(
 
 pub async fn test_account(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     timeout_secs: u64,
 ) -> AccountTestResult {
-    match connect(account, password, timeout_secs).await {
+    match connect(account, credentials, timeout_secs).await {
         Ok(mut session) => {
             let caps: Vec<String> = imap_timeout(timeout_secs, "capabilities", session.capabilities())
                 .await
@@ -141,7 +183,7 @@ pub async fn test_account(
 
 pub async fn fetch_new_messages(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     last_uid: u32,
     full: bool,
     preview_chars: usize,
@@ -149,7 +191,7 @@ pub async fn fetch_new_messages(
     full_limit: usize,
     timeout_secs: u64,
 ) -> Result<(Vec<(u32, ParsedMail, bool, bool)>, u32)> {
-    let mut session = connect(account, password, timeout_secs).await?;
+    let mut session = connect(account, credentials, timeout_secs).await?;
     imap_timeout(
         timeout_secs,
         "select inbox",
@@ -251,7 +293,7 @@ pub type ApplyStepCallback<'a> = dyn FnMut(usize, &MessageDecision, &ActionResul
 
 pub async fn apply_decisions(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     decisions: &[MessageDecision],
     allow_delete: bool,
     dry_run: bool,
@@ -279,7 +321,7 @@ pub async fn apply_decisions(
         return Ok(results);
     }
 
-    let mut session = connect(account, password, timeout_secs).await?;
+    let mut session = connect(account, credentials, timeout_secs).await?;
     imap_timeout(
         timeout_secs,
         "select inbox",
@@ -406,24 +448,24 @@ pub async fn apply_decisions(
 /// Mark a single message \\Seen on the server (inbox survivors / leftover unread).
 pub async fn mark_seen(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     uid: u32,
     timeout_secs: u64,
 ) -> Result<()> {
-    mark_seen_uids(account, password, &[uid], timeout_secs).await
+    mark_seen_uids(account, credentials, &[uid], timeout_secs).await
 }
 
 /// Mark many messages \\Seen in one IMAP session (comma-separated UID STORE).
 pub async fn mark_seen_uids(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     uids: &[u32],
     timeout_secs: u64,
 ) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
-    let mut session = connect(account, password, timeout_secs).await?;
+    let mut session = connect(account, credentials, timeout_secs).await?;
     imap_timeout(
         timeout_secs,
         "select inbox",

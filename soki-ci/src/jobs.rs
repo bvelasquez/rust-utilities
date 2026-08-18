@@ -53,10 +53,43 @@ pub struct JobOrchestrator {
     max_history: usize,
 }
 
+fn deploy_slot_key(project_id: &str, target_id: &str) -> String {
+    format!("{project_id}/{target_id}")
+}
+
 struct OrchestratorInner {
     jobs: HashMap<Uuid, JobRecord>,
     order: Vec<Uuid>,
-    project_running: HashMap<String, Uuid>,
+    /// One active (queued or running) job per project/target pair.
+    target_running: HashMap<String, Uuid>,
+}
+
+impl OrchestratorInner {
+    fn trim_history(&mut self, max_history: usize) {
+        while self.order.len() > max_history {
+            let Some(old) = self.order.pop() else {
+                break;
+            };
+            let removable = self
+                .jobs
+                .get(&old)
+                .is_some_and(|j| j.phase != JobPhase::Running && j.phase != JobPhase::Queued);
+            if removable {
+                self.jobs.remove(&old);
+                continue;
+            }
+            // Oldest entry is still active — stop trimming (should be rare).
+            self.order.push(old);
+            break;
+        }
+    }
+
+    fn clear_target_slot(&mut self, project_id: &str, target_id: &str, job_id: Uuid) {
+        let key = deploy_slot_key(project_id, target_id);
+        if self.target_running.get(&key) == Some(&job_id) {
+            self.target_running.remove(&key);
+        }
+    }
 }
 
 impl JobOrchestrator {
@@ -68,7 +101,7 @@ impl JobOrchestrator {
             inner: Arc::new(Mutex::new(OrchestratorInner {
                 jobs: HashMap::new(),
                 order: Vec::new(),
-                project_running: HashMap::new(),
+                target_running: HashMap::new(),
             })),
             semaphore: Arc::new(Semaphore::new(permits)),
             speak,
@@ -107,18 +140,9 @@ impl JobOrchestrator {
         project: &ResolvedProject,
         target: &ResolvedTarget,
     ) -> Result<Uuid> {
-        {
-            let g = self.inner.lock().await;
-            if g.project_running.contains_key(&project.id) {
-                bail!(
-                    "project `{}` already has a running or queued deploy",
-                    project.id
-                );
-            }
-        }
-
         let id = Uuid::new_v4();
         let log_path = log_path_for(&id)?;
+        let slot = deploy_slot_key(&project.id, &target.id);
         let mut record = JobRecord {
             id,
             project_id: project.id.clone(),
@@ -139,14 +163,17 @@ impl JobOrchestrator {
 
         {
             let mut g = self.inner.lock().await;
+            if g.target_running.contains_key(&slot) {
+                bail!(
+                    "target `{}/{}` already has a running or queued deploy",
+                    project.id,
+                    target.id
+                );
+            }
             g.jobs.insert(id, record);
             g.order.insert(0, id);
-            g.project_running.insert(project.id.clone(), id);
-            while g.order.len() > self.max_history {
-                if let Some(old) = g.order.pop() {
-                    g.jobs.remove(&old);
-                }
-            }
+            g.target_running.insert(slot, id);
+            g.trim_history(self.max_history);
         }
 
         let spec = build_spawn_spec(project, target)?;
@@ -155,19 +182,23 @@ impl JobOrchestrator {
         let speak = self.speak.clone();
         let broker = self.broker.clone();
         let project_id = project.id.clone();
+        let target_id = target.id.clone();
         let project_name = project.name.clone();
         let target_label = target.label.clone();
         let target_speak = target.speak;
         let log_path = log_path.clone();
 
         tokio::spawn(async move {
-            let _permit = semaphore.acquire().await;
+            let Ok(_permit) = semaphore.acquire().await else {
+                return;
+            };
             if let Err(e) = run_job(
                 id,
                 spec,
                 log_path,
                 inner.clone(),
                 project_id.clone(),
+                target_id.clone(),
                 project_name,
                 target_label,
                 target_speak,
@@ -182,11 +213,35 @@ impl JobOrchestrator {
                     j.finished_at = Some(Utc::now());
                     j.push_log(format!("orchestrator error: {e}"));
                 }
-                g.project_running.remove(&project_id);
+                g.clear_target_slot(&project_id, &target_id, id);
             }
         });
 
         Ok(id)
+    }
+
+    /// Removes finished jobs and their log files; keeps queued/running jobs.
+    pub async fn clear_history(&self) -> Result<usize> {
+        let mut g = self.inner.lock().await;
+        let to_remove: Vec<Uuid> = g
+            .order
+            .iter()
+            .filter(|id| {
+                g.jobs
+                    .get(id)
+                    .is_some_and(|j| j.phase != JobPhase::Running && j.phase != JobPhase::Queued)
+            })
+            .copied()
+            .collect();
+        let n = to_remove.len();
+        for id in &to_remove {
+            if let Some(job) = g.jobs.get(id) {
+                let _ = std::fs::remove_file(&job.log_path);
+            }
+            g.jobs.remove(id);
+        }
+        g.order.retain(|id| !to_remove.contains(id));
+        Ok(n)
     }
 
     pub async fn cancel(&self, id: Uuid) -> Result<()> {
@@ -197,9 +252,10 @@ impl JobOrchestrator {
             bail!("job is not running");
         }
         let project_id = job.project_id.clone();
+        let target_id = job.target_id.clone();
         job.phase = JobPhase::Cancelled;
         job.finished_at = Some(Utc::now());
-        g.project_running.remove(&project_id);
+        g.clear_target_slot(&project_id, &target_id, id);
         Ok(())
     }
 }
@@ -210,6 +266,7 @@ async fn run_job(
     log_path: std::path::PathBuf,
     inner: Arc<Mutex<OrchestratorInner>>,
     project_id: String,
+    target_id: String,
     project_name: String,
     target_label: String,
     target_speak: Option<bool>,
@@ -218,7 +275,10 @@ async fn run_job(
 ) -> Result<()> {
     {
         let mut g = inner.lock().await;
-        let job = g.jobs.get_mut(&id).expect("job");
+        let Some(job) = g.jobs.get_mut(&id) else {
+            g.clear_target_slot(&project_id, &target_id, id);
+            return Ok(());
+        };
         job.phase = JobPhase::Running;
         job.started_at = Some(Utc::now());
         job.push_log(format!("running: {} {:?}", spec.program, spec.args));
@@ -273,12 +333,13 @@ async fn run_job(
 
     {
         let mut g = inner.lock().await;
-        let job = g.jobs.get_mut(&id).expect("job");
-        job.phase = phase;
-        job.finished_at = Some(Utc::now());
-        job.exit_code = Some(code);
-        job.push_log(format!("finished: exit {code}"));
-        g.project_running.remove(&project_id);
+        if let Some(job) = g.jobs.get_mut(&id) {
+            job.phase = phase;
+            job.finished_at = Some(Utc::now());
+            job.exit_code = Some(code);
+            job.push_log(format!("finished: exit {code}"));
+        }
+        g.clear_target_slot(&project_id, &target_id, id);
     }
 
     if should_speak {

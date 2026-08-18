@@ -8,7 +8,8 @@ use clap::{Parser, Subcommand};
     version,
     about = "Multi-project deploy control panel — parallel deploys, TUI, broker TTS",
     after_help = "Agents: run `soki-ci capabilities --json` and `soki-ci env schema --json`.\n\
-        Config: user-wide projects.yaml (see `soki-ci config path`)."
+        Config: user-wide projects.yaml (see `soki-ci config path`).\n\
+        TUI starts the HTTP API on --bind (default 127.0.0.1:9847); use --no-api to disable."
 )]
 pub struct Cli {
     #[arg(long, global = true, help = "Structured JSON envelope output")]
@@ -30,13 +31,38 @@ pub struct Cli {
     )]
     pub non_interactive: bool,
 
+    #[arg(
+        long,
+        global = true,
+        env = "SOKI_CI_API_BIND",
+        default_value = "127.0.0.1:9847",
+        help = "HTTP API listen address (host:port); used by TUI and `serve`"
+    )]
+    pub bind: String,
+
+    #[arg(
+        long,
+        global = true,
+        env = "SOKI_CI_API_TOKEN",
+        help = "Bearer token for HTTP API (required when binding beyond loopback)"
+    )]
+    pub api_token: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        default_value_t = false,
+        help = "Do not start the HTTP API with the TUI"
+    )]
+    pub no_api: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Interactive deploy dashboard (default in TTY)
+    /// Interactive deploy dashboard (default in TTY); also serves the HTTP API unless --no-api
     Watch,
     /// Project registry
     Projects {
@@ -58,6 +84,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: JobsCommands,
     },
+    /// HTTP API only (no TUI) — list and trigger deploy builds
+    Serve,
     /// Machine-readable command catalog
     Capabilities,
     /// Environment variable schema
@@ -116,6 +144,11 @@ pub enum JobsCommands {
         #[arg(short, long)]
         id: String,
         #[arg(long)]
+        yes: bool,
+    },
+    /// Drop finished deployments and log files (keeps active jobs)
+    Reset {
+        #[arg(long, help = "Required for non-interactive reset")]
         yes: bool,
     },
 }

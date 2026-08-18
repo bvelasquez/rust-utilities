@@ -177,6 +177,11 @@ pub enum AccountsCommands {
         smtp_port: u16,
         #[arg(long, help = "Use Gmail IMAP/SMTP + folder defaults")]
         gmail: bool,
+        #[arg(
+            long,
+            help = "Use Sign in with Google (OAuth) instead of an app password; run accounts google-login after add"
+        )]
+        google_oauth: bool,
         #[arg(long, help = "Use iCloud Mail IMAP/SMTP + folder defaults (app-specific password)")]
         icloud: bool,
         #[arg(long, help = "IMAP/SMTP password (saved to secrets.toml)")]
@@ -184,6 +189,18 @@ pub enum AccountsCommands {
     },
     Test {
         id: String,
+    },
+    /// Sign in with Google for a Gmail account (browser OAuth)
+    #[command(name = "google-login")]
+    GoogleLogin {
+        #[arg(long)]
+        id: String,
+        #[arg(long, help = "Gmail address (required if account does not exist yet)")]
+        email: Option<String>,
+        #[arg(long, help = "Add a new Gmail account with OAuth if missing")]
+        add: bool,
+        #[arg(long, help = "Skip post-login IMAP test (faster; use accounts test after)")]
+        skip_test: bool,
     },
 }
 
@@ -270,6 +287,14 @@ pub enum SecretsCommands {
         id: String,
         #[arg(long)]
         password: String,
+    },
+    /// Save Google OAuth client id/secret (Desktop app from Google Cloud Console)
+    #[command(name = "set-google-oauth")]
+    SetGoogleOauth {
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        client_secret: String,
     },
 }
 

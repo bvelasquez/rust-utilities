@@ -5,7 +5,7 @@ use crate::mail::smtp;
 use crate::output::Envelope;
 use crate::safety::confirm_mutation;
 
-pub fn run(
+pub async fn run(
     ctx: &CommandContext,
     account_id: &str,
     to: &str,
@@ -15,7 +15,7 @@ pub fn run(
     yes: bool,
 ) -> Result<()> {
     let account = ctx.app.account_by_id(account_id)?;
-    let password = ctx.app.resolve_password(account)?;
+    let credentials = ctx.app.resolve_mail_credentials(account).await?;
 
     confirm_mutation(
         dry_run,
@@ -23,7 +23,7 @@ pub fn run(
         &format!("Send email to {to}? Type 'yes' to confirm: "),
     )?;
 
-    let result = smtp::send_mail(account, &password, to, subject, body, dry_run)?;
+    let result = smtp::send_mail(account, &credentials, to, subject, body, dry_run)?;
 
     if ctx.json {
         Envelope::ok("send", result).print_json()?;

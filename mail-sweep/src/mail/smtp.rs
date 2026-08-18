@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Message, SmtpTransport, Transport};
 use serde::Serialize;
 
 use crate::config::AccountConfig;
+use crate::mail::credentials::MailCredentials;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SendResult {
@@ -18,7 +19,7 @@ pub struct SendResult {
 
 pub fn send_mail(
     account: &AccountConfig,
-    password: &str,
+    credentials: &MailCredentials,
     to: &str,
     subject: &str,
     body: &str,
@@ -49,10 +50,20 @@ pub fn send_mail(
         .header(ContentType::TEXT_PLAIN)
         .body(body.to_string())?;
 
-    let creds = Credentials::new(account.email.clone(), password.to_string());
+    let (creds, mechanisms) = match credentials {
+        MailCredentials::Password(password) => (
+            Credentials::new(account.email.clone(), password.clone()),
+            vec![Mechanism::Plain],
+        ),
+        MailCredentials::OAuthAccessToken(token) => (
+            Credentials::new(account.email.clone(), token.clone()),
+            vec![Mechanism::Xoauth2],
+        ),
+    };
     let mailer = SmtpTransport::relay(&account.smtp_host)?
         .port(account.smtp_port)
         .credentials(creds)
+        .authentication(mechanisms)
         .build();
 
     mailer.send(&email)?;

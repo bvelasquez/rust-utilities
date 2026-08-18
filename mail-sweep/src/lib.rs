@@ -76,7 +76,7 @@ pub async fn run() -> Result<()> {
             dry_run,
             yes,
         }) => {
-            commands::send::run(&ctx, &account, &to, &subject, &body, dry_run, yes)?;
+            commands::send::run(&ctx, &account, &to, &subject, &body, dry_run, yes).await?;
         }
         Some(Commands::Accounts { command }) => {
             commands::accounts::run(&mut ctx, &command).await?;

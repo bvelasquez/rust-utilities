@@ -40,8 +40,8 @@ pub async fn sync_all(
     let mut total_stored = 0usize;
 
     for account in accounts {
-        let password = match ctx.app.resolve_password(account) {
-            Ok(p) => p,
+        let credentials = match ctx.app.resolve_mail_credentials(account).await {
+            Ok(c) => c,
             Err(e) => {
                 reports.push(AccountSyncReport {
                     account_id: account.id.clone(),
@@ -60,7 +60,7 @@ pub async fn sync_all(
         let timeout_secs = ctx.app.config.sync.imap_timeout_secs;
         match imap::fetch_new_messages(
             account,
-            &password,
+            &credentials,
             state.last_uid,
             full,
             preview,

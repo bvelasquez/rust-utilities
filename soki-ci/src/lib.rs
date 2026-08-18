@@ -1,3 +1,4 @@
+pub mod api;
 pub mod broker;
 pub mod capabilities;
 pub mod cli;
@@ -19,7 +20,24 @@ pub async fn run() -> anyhow::Result<()> {
         None | Some(cli::Commands::Watch) => {
             let ctx = commands::AppContext::from_cli(&cli).await?;
             if std::io::stdout().is_terminal() && !cli.non_interactive {
-                ui::run_dashboard(ctx).await?;
+                let api = if cli.no_api {
+                    None
+                } else {
+                    let addr = api::parse_bind(&cli.bind)?;
+                    let handle = api::spawn_api(
+                        ctx.jobs.clone(),
+                        ctx.config_path.clone(),
+                        addr,
+                        cli.api_token.clone(),
+                    )
+                    .await?;
+                    eprintln!(
+                        "soki-ci API listening on http://{} (shared with TUI)",
+                        handle.bind
+                    );
+                    Some(handle)
+                };
+                ui::run_dashboard(ctx, api).await?;
             } else {
                 anyhow::bail!(
                     "Interactive TUI requires a TTY. Run `soki-ci watch` or use subcommands (e.g. `deploy run --yes`)."
@@ -98,7 +116,15 @@ pub async fn run() -> anyhow::Result<()> {
                 cli::JobsCommands::Cancel { id, yes } => {
                     commands::jobs_cmd::run_cancel(&ctx, id, *yes, cli.json)?;
                 }
+                cli::JobsCommands::Reset { yes } => {
+                    commands::jobs_cmd::run_reset(&ctx, *yes, cli.json)?;
+                }
             }
+        }
+        Some(cli::Commands::Serve) => {
+            let ctx = commands::AppContext::from_cli(&cli).await?;
+            let addr = commands::serve::parse_bind(&cli.bind)?;
+            commands::serve::run(ctx, addr, cli.api_token.clone()).await?;
         }
     }
 

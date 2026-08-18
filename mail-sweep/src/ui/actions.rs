@@ -67,9 +67,9 @@ pub async fn do_apply_auto(ctx: &CommandContext) -> Result<String> {
 
 pub async fn do_mark_read(ctx: &CommandContext, account_id: &str, uid: u32) -> Result<String> {
     let account = ctx.app.account_by_id(account_id)?;
-    let password = ctx.app.resolve_password(account)?;
+    let credentials = ctx.app.resolve_mail_credentials(account).await?;
     let timeout = ctx.app.config.sync.imap_timeout_secs;
-    crate::mail::imap::mark_seen(account, &password, uid, timeout).await?;
+    crate::mail::imap::mark_seen(account, &credentials, uid, timeout).await?;
     let store = crate::store::Store::open(&ctx.app.db_path())?;
     store.mark_message_read(account_id, uid)?;
     Ok(format!("Marked read — {account_id} uid {uid}"))
@@ -98,8 +98,8 @@ pub async fn do_mark_all_read(ctx: &CommandContext, limit: usize) -> Result<Stri
     let timeout = ctx.app.config.sync.imap_timeout_secs;
     for (account_id, uids) in &by_account {
         let account = ctx.app.account_by_id(account_id)?;
-        let password = ctx.app.resolve_password(account)?;
-        crate::mail::imap::mark_seen_uids(account, &password, uids, timeout).await?;
+        let credentials = ctx.app.resolve_mail_credentials(account).await?;
+        crate::mail::imap::mark_seen_uids(account, &credentials, uids, timeout).await?;
     }
 
     let marked = store.mark_messages_read(&items)?;

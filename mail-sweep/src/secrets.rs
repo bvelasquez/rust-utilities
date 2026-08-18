@@ -11,6 +11,20 @@ pub struct SecretsFile {
     pub llm_model: Option<String>,
     #[serde(default)]
     pub accounts: HashMap<String, String>,
+    /// Google Cloud OAuth client (Desktop app) for Gmail sign-in.
+    pub google_oauth_client_id: Option<String>,
+    pub google_oauth_client_secret: Option<String>,
+    #[serde(default)]
+    pub google_oauth_tokens: HashMap<String, GoogleOAuthAccountTokens>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleOAuthAccountTokens {
+    pub refresh_token: String,
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 impl SecretsFile {
@@ -46,8 +60,17 @@ impl SecretsFile {
         if other.llm_model.is_some() {
             self.llm_model = other.llm_model.clone();
         }
+        if other.google_oauth_client_id.is_some() {
+            self.google_oauth_client_id = other.google_oauth_client_id.clone();
+        }
+        if other.google_oauth_client_secret.is_some() {
+            self.google_oauth_client_secret = other.google_oauth_client_secret.clone();
+        }
         for (id, password) in &other.accounts {
             self.accounts.insert(id.clone(), password.clone());
+        }
+        for (id, tokens) in &other.google_oauth_tokens {
+            self.google_oauth_tokens.insert(id.clone(), tokens.clone());
         }
     }
 
@@ -101,6 +124,12 @@ fn apply_dotenv_pair(secrets: &mut SecretsFile, key: &str, value: &str) {
         }
         "llm_model" | "MAIL_SWEEP_LLM_MODEL" => {
             secrets.llm_model = Some(value.into());
+        }
+        "google_oauth_client_id" | "MAIL_SWEEP_GOOGLE_OAUTH_CLIENT_ID" => {
+            secrets.google_oauth_client_id = Some(value.into());
+        }
+        "google_oauth_client_secret" | "MAIL_SWEEP_GOOGLE_OAUTH_CLIENT_SECRET" => {
+            secrets.google_oauth_client_secret = Some(value.into());
         }
         k if k.starts_with("account_") && k.ends_with("_password") => {
             let id = k

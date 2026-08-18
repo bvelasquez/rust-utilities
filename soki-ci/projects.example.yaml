@@ -89,3 +89,45 @@ projects:
         runner: { kind: pnpm_script, script: deploy:functions }
       testflight:
         runner: { kind: pnpm_script, script: mobile:testflight }
+
+  # Rust / Makefile deploys — runner kind `make` (see flatland3/Makefile)
+  - id: flatland3
+    name: Flatland 3
+    path: "${projects_dir}/flatland3"
+    targets:
+      deploy-oracle:
+        label: Deploy Oracle
+        runner: { kind: make, target: deploy-oracle }
+      publish-oracle:
+        label: Publish Oracle
+        runner: { kind: make, target: publish-oracle }
+      sync-content-oracle:
+        label: Sync Content Oracle
+        runner: { kind: make, target: sync-content-oracle }
+      gfx-install:
+        label: Install Gfx Client
+        runner: { kind: make, target: gfx-install }
+
+  - id: mail-sweep
+    name: Mail Sweep
+    path: "${projects_dir}/utilities/mail-sweep"
+    targets:
+      install:
+        label: Install CLI
+        runner: { kind: make, target: install }
+      build:
+        runner: { kind: make, target: build }
+      test:
+        runner: { kind: make, target: test }
+
+  - id: disk-sweep
+    name: Disk Sweep
+    path: "${projects_dir}/utilities/disk-sweep"
+    targets:
+      install:
+        label: Install CLI
+        runner: { kind: make, target: install }
+      build:
+        runner: { kind: make, target: build }
+      test:
+        runner: { kind: make, target: test }

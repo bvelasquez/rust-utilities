@@ -17,6 +17,10 @@ Configure accounts and secrets (no exported env vars required):
 mail-sweep accounts add --id personal --email you@gmail.com --gmail
 mail-sweep accounts add --id icloud --email you@icloud.com --icloud
 mail-sweep secrets set-openrouter-key --key sk-or-v1-...
+mail-sweep accounts add --id personal --email you@gmail.com --gmail --google-oauth
+mail-sweep secrets set-google-oauth --client-id '...' --client-secret '...'
+mail-sweep accounts google-login --id personal
+# or app password:
 mail-sweep secrets set-account --id personal --password 'your-app-password'
 mail-sweep accounts test personal --json
 ```
@@ -128,7 +132,26 @@ mail-sweep accounts add --id personal --email you@gmail.com --gmail --password '
 
 ## Gmail notes
 
-- Use an [App Password](https://support.google.com/accounts/answer/185833) (OAuth deferred to a later version).
+- **Sign in with Google (recommended):** create a [Google Cloud OAuth client](https://console.cloud.google.com/apis/credentials) (Desktop app), enable the Gmail API if prompted, then:
+
+  ```bash
+  mail-sweep secrets set-google-oauth --client-id '....apps.googleusercontent.com' --client-secret '...'
+  mail-sweep accounts add --id personal --email you@gmail.com --gmail --google-oauth
+  mail-sweep accounts google-login --id personal
+  ```
+
+  Repeat `google-login` with a different `--id` (and `--email` / `--add`) for each Gmail account. Google’s [Sign in with Google](https://support.google.com/accounts/answer/12849458) flow lets you pick which account to link.
+
+- **Error 403 `access_denied` / “has not completed the Google verification process”:** Your OAuth app is in **Testing** (normal for personal CLI tools). Only **test users** you add on the consent screen can sign in — not “any Google account” until Google verifies the app (not practical for private mail-sweep use).
+
+  1. Open [Google Cloud Console](https://console.cloud.google.com/) → the project that owns the client id in `secrets.toml` (the browser shows that app name, e.g. “Velasquez Spending Dashboard”).
+  2. **APIs & Services** → **OAuth consent screen** → **Test users** → **Add users**.
+  3. Add every Gmail address you will connect (`madsin35@gmail.com`, work accounts, etc.). Up to 100 test users while status is Testing.
+  4. Run `mail-sweep accounts google-login --id <id>` again.
+
+  Optional: create a **separate** Desktop OAuth client (or project) named “mail-sweep” so other apps’ OAuth settings stay isolated — mail-sweep only needs the client id/secret in `secrets set-google-oauth`.
+
+- **App password (legacy):** [App Password](https://support.google.com/accounts/answer/185833) still works with `secrets set-account` and skips OAuth entirely.
 - Archive maps to `[Gmail]/All Mail` via IMAP MOVE when supported.
 - Archive / move / delete also set `\Seen` first. Gmail category tabs (Promotions, Social, Updates, Purchases) count unread across All Mail, so clearing without marking read leaves badges behind.
 
