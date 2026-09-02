@@ -17,7 +17,7 @@ use crate::jobs::JobOrchestrator;
 pub struct ApiState {
     pub jobs: Arc<JobOrchestrator>,
     pub config_path: PathBuf,
-    /// When set, `Authorization: Bearer <token>` is required on all routes except `GET /health`.
+    /// When set, `Authorization: Bearer <token>` is required on all routes except `GET /health` and `GET /capabilities`.
     pub api_token: Option<Arc<str>>,
 }
 
@@ -116,7 +116,7 @@ pub async fn run_server(
 ) -> Result<()> {
     let handle = spawn_api(jobs, config_path, bind, api_token).await?;
     eprintln!(
-        "soki-ci API listening on http://{} (GET /projects/builds, POST /projects/{{id}}/builds/{{id}})",
+        "soki-ci API listening on http://{} (GET /capabilities, GET /projects/builds, POST /projects/{{id}}/builds/{{id}})",
         handle.bind
     );
     tokio::signal::ctrl_c()

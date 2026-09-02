@@ -76,7 +76,26 @@ projects:
     package_manager: npm
     targets:
       testflight:
+        label: iOS TestFlight
         runner: { kind: npm_script, script: mobile:testflight }
+      android-beta:
+        label: Android Play (beta)
+        runner: { kind: npm_script, script: mobile:android:beta }
+      android-internal:
+        label: Android Play (internal)
+        runner: { kind: npm_script, script: mobile:android:internal }
+
+  - id: mighty45-web
+    name: Mighty45 Web (Coach Console)
+    path: "${projects_dir}/mighty45-web/apps/coach-console"
+    package_manager: npm
+    targets:
+      hosting:
+        label: Coach Console Hosting
+        runner: { kind: npm_script, script: deploy:hosting }
+      functions:
+        label: Coach Console Functions
+        runner: { kind: npm_script, script: deploy:functions }
 
   - id: simple-log
     name: Simple Log

@@ -53,6 +53,46 @@ pub fn run_logs(ctx: &AppContext, id: &str, tail: usize, json: bool) -> Result<(
     Ok(())
 }
 
+pub async fn run_input(
+    bind: &str,
+    api_token: Option<&str>,
+    id: &str,
+    text: &str,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    require_yes(yes, "send job stdin")?;
+    let _ = Uuid::parse_str(id)?;
+    let url = format!("http://{bind}/jobs/{id}/input");
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({ "text": text }));
+    if let Some(token) = api_token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| {
+        anyhow::anyhow!(
+            "could not reach soki-ci API at {bind} ({e}); start the TUI or `soki-ci serve`"
+        )
+    })?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(json!({}));
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("request failed");
+        anyhow::bail!("API {status}: {err}");
+    }
+    let data = json!({ "id": id, "sent": true, "text": text });
+    if json {
+        Envelope::ok("jobs input", data).print_json()?;
+    } else {
+        println!("sent stdin to {id}");
+    }
+    Ok(())
+}
+
 pub fn run_reset(ctx: &AppContext, yes: bool, json: bool) -> Result<()> {
     require_yes(yes, "reset job history")?;
     let removed = tokio::task::block_in_place(|| {

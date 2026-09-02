@@ -113,6 +113,17 @@ pub async fn run() -> anyhow::Result<()> {
                 cli::JobsCommands::Logs { id, tail } => {
                     commands::jobs_cmd::run_logs(&ctx, id, *tail, cli.json)?
                 }
+                cli::JobsCommands::Input { id, text, yes } => {
+                    commands::jobs_cmd::run_input(
+                        &cli.bind,
+                        cli.api_token.as_deref(),
+                        id,
+                        text,
+                        *yes,
+                        cli.json,
+                    )
+                    .await?;
+                }
                 cli::JobsCommands::Cancel { id, yes } => {
                     commands::jobs_cmd::run_cancel(&ctx, id, *yes, cli.json)?;
                 }

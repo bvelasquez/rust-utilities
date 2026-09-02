@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::config::{PackageManager, ResolvedProject, ResolvedTarget, RunnerConfig};
@@ -52,7 +51,7 @@ pub async fn spawn_deploy(spec: &SpawnSpec) -> Result<tokio::process::Child> {
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .current_dir(&spec.cwd)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in &spec.env {
@@ -62,14 +61,54 @@ pub async fn spawn_deploy(spec: &SpawnSpec) -> Result<tokio::process::Child> {
         .with_context(|| format!("spawn {} in {}", spec.program, spec.cwd.display()))
 }
 
+/// Read stdout/stderr, emitting complete lines and flushing prompt fragments
+/// that never get a newline (typical `y/N` questions) after a short idle.
 pub async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     tx: tokio::sync::mpsc::Sender<String>,
     prefix: &'static str,
 ) {
-    let mut lines = BufReader::new(&mut reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let _ = tx.send(format!("{prefix}{line}")).await;
+    use tokio::io::AsyncReadExt;
+    use tokio::time::{timeout, Duration};
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        match timeout(Duration::from_millis(150), reader.read(&mut tmp)).await {
+            Ok(Ok(0)) => {
+                if !buf.is_empty() {
+                    let line = String::from_utf8_lossy(&buf).into_owned();
+                    let _ = tx.send(format!("{prefix}{line}")).await;
+                }
+                break;
+            }
+            Ok(Ok(n)) => {
+                buf.extend_from_slice(&tmp[..n]);
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let mut line: Vec<u8> = buf.drain(..=pos).collect();
+                    if line.last() == Some(&b'\n') {
+                        line.pop();
+                    }
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    let s = String::from_utf8_lossy(&line).into_owned();
+                    if tx.send(format!("{prefix}{s}")).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                if !buf.is_empty() {
+                    let s = String::from_utf8_lossy(&buf).into_owned();
+                    buf.clear();
+                    if tx.send(format!("{prefix}{s}")).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 

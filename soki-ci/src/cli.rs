@@ -139,6 +139,15 @@ pub enum JobsCommands {
         #[arg(long, default_value_t = 0)]
         tail: usize,
     },
+    /// Write a line to a running job's stdin (via the TUI/serve HTTP API)
+    Input {
+        #[arg(short, long)]
+        id: String,
+        #[arg(long, help = "Bytes to send; a newline is appended if missing")]
+        text: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Send SIGTERM to a running job
     Cancel {
         #[arg(short, long)]

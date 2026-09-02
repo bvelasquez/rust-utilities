@@ -11,6 +11,7 @@ use super::ApiState;
 pub fn router(state: ApiState) -> Router {
     let public = Router::new()
         .route("/health", get(handlers::health))
+        .route("/capabilities", get(handlers::capabilities))
         .with_state(state.clone());
 
     let protected = Router::new()
@@ -21,6 +22,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/jobs", get(handlers::list_jobs))
         .route("/jobs/{job_id}", get(handlers::get_job))
+        .route("/jobs/{job_id}/input", post(handlers::send_job_input))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state);
 

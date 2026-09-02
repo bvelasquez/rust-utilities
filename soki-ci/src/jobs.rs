@@ -62,6 +62,8 @@ struct OrchestratorInner {
     order: Vec<Uuid>,
     /// One active (queued or running) job per project/target pair.
     target_running: HashMap<String, Uuid>,
+    /// Writers for running child stdin (prompts like y/N).
+    stdin: HashMap<Uuid, mpsc::Sender<Vec<u8>>>,
 }
 
 impl OrchestratorInner {
@@ -102,6 +104,7 @@ impl JobOrchestrator {
                 jobs: HashMap::new(),
                 order: Vec::new(),
                 target_running: HashMap::new(),
+                stdin: HashMap::new(),
             })),
             semaphore: Arc::new(Semaphore::new(permits)),
             speak,
@@ -161,6 +164,19 @@ impl JobOrchestrator {
             project.id, target.id
         ));
 
+        let spec = build_spawn_spec(project, target)?;
+        let inner = self.inner.clone();
+        let semaphore = self.semaphore.clone();
+        let speak = self.speak.clone();
+        let broker = self.broker.clone();
+        let project_id = project.id.clone();
+        let target_id = target.id.clone();
+        let project_name = project.name.clone();
+        let target_label = target.label.clone();
+        let target_speak = target.speak;
+        let log_path = log_path.clone();
+        let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(32);
+
         {
             let mut g = self.inner.lock().await;
             if g.target_running.contains_key(&slot) {
@@ -173,20 +189,9 @@ impl JobOrchestrator {
             g.jobs.insert(id, record);
             g.order.insert(0, id);
             g.target_running.insert(slot, id);
+            g.stdin.insert(id, in_tx);
             g.trim_history(self.max_history);
         }
-
-        let spec = build_spawn_spec(project, target)?;
-        let inner = self.inner.clone();
-        let semaphore = self.semaphore.clone();
-        let speak = self.speak.clone();
-        let broker = self.broker.clone();
-        let project_id = project.id.clone();
-        let target_id = target.id.clone();
-        let project_name = project.name.clone();
-        let target_label = target.label.clone();
-        let target_speak = target.speak;
-        let log_path = log_path.clone();
 
         tokio::spawn(async move {
             let Ok(_permit) = semaphore.acquire().await else {
@@ -197,6 +202,7 @@ impl JobOrchestrator {
                 spec,
                 log_path,
                 inner.clone(),
+                in_rx,
                 project_id.clone(),
                 target_id.clone(),
                 project_name,
@@ -213,6 +219,7 @@ impl JobOrchestrator {
                     j.finished_at = Some(Utc::now());
                     j.push_log(format!("orchestrator error: {e}"));
                 }
+                g.stdin.remove(&id);
                 g.clear_target_slot(&project_id, &target_id, id);
             }
         });
@@ -255,7 +262,46 @@ impl JobOrchestrator {
         let target_id = job.target_id.clone();
         job.phase = JobPhase::Cancelled;
         job.finished_at = Some(Utc::now());
+        g.stdin.remove(&id);
         g.clear_target_slot(&project_id, &target_id, id);
+        Ok(())
+    }
+
+    /// Write a line to a running job's stdin (appends newline if missing).
+    pub async fn send_input(&self, id: Uuid, text: &str) -> Result<()> {
+        let payload = if text.ends_with('\n') {
+            text.to_string()
+        } else {
+            format!("{text}\n")
+        };
+        let tx = {
+            let g = self.inner.lock().await;
+            let job = g.jobs.get(&id).ok_or_else(|| anyhow!("job not found"))?;
+            if job.phase != JobPhase::Running && job.phase != JobPhase::Queued {
+                bail!("job is not running");
+            }
+            g.stdin
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| anyhow!("job stdin is not available"))?
+        };
+        tx.send(payload.as_bytes().to_vec())
+            .await
+            .map_err(|_| anyhow!("failed to write job stdin (process may have exited)"))?;
+
+        let echo = payload.trim_end_matches(['\r', '\n']);
+        let log_line = format!("[stdin] {echo}");
+        let log_path = {
+            let mut g = self.inner.lock().await;
+            let path = g.jobs.get(&id).map(|j| j.log_path.clone());
+            if let Some(j) = g.jobs.get_mut(&id) {
+                j.push_log(log_line.clone());
+            }
+            path
+        };
+        if let Some(path) = log_path {
+            let _ = append_log(std::path::Path::new(&path), &log_line).await;
+        }
         Ok(())
     }
 }
@@ -265,6 +311,7 @@ async fn run_job(
     spec: crate::runner::SpawnSpec,
     log_path: std::path::PathBuf,
     inner: Arc<Mutex<OrchestratorInner>>,
+    mut in_rx: mpsc::Receiver<Vec<u8>>,
     project_id: String,
     target_id: String,
     project_name: String,
@@ -287,6 +334,19 @@ async fn run_job(
     let mut child = spawn_deploy(&spec).await?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    if let Some(mut stdin) = child.stdin.take() {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            while let Some(bytes) = in_rx.recv().await {
+                if stdin.write_all(&bytes).await.is_err() {
+                    break;
+                }
+                if stdin.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
     let (tx, mut rx) = mpsc::channel::<String>(256);
     let log_path_stdout = log_path.clone();
     let log_path_stderr = log_path.clone();
@@ -339,6 +399,7 @@ async fn run_job(
             job.exit_code = Some(code);
             job.push_log(format!("finished: exit {code}"));
         }
+        g.stdin.remove(&id);
         g.clear_target_slot(&project_id, &target_id, id);
     }
 

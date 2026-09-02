@@ -100,6 +100,99 @@ async fn api_list_and_trigger_build() {
 }
 
 #[tokio::test]
+async fn api_send_stdin_answers_prompt() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("projects.yaml");
+    std::fs::write(
+        &path,
+        r#"
+version: 1
+defaults:
+  max_parallel: 2
+  speak:
+    enabled: false
+projects:
+  - id: api-test
+    path: "."
+    targets:
+      prompt:
+        label: Prompt
+        runner:
+          kind: shell
+          command: ["sh", "-c", "printf 'Continue? [y/N] '; read ans; test \"$ans\" = y"]
+"#,
+    )
+    .unwrap();
+    let state = test_state(&path);
+    let app = routes::router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/projects/api-test/builds/prompt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let job_id = v["job_id"].as_str().unwrap().to_string();
+
+    let mut saw_running = false;
+    for _ in 0..40 {
+        if let Some(job) = state
+            .jobs
+            .get_job(uuid::Uuid::parse_str(&job_id).unwrap())
+            .await
+        {
+            if job.phase == JobPhase::Running || job.phase == JobPhase::Queued {
+                saw_running = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(saw_running, "job never became queued/running");
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/jobs/{job_id}/input"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"y"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "stdin post failed");
+
+    for _ in 0..40 {
+        if let Some(job) = state
+            .jobs
+            .get_job(uuid::Uuid::parse_str(&job_id).unwrap())
+            .await
+        {
+            if job.phase == JobPhase::Success {
+                return;
+            }
+            if matches!(job.phase, JobPhase::Error | JobPhase::Cancelled) {
+                panic!("job failed: {:?} tail={:?}", job.phase, job.log_tail);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("prompt job did not finish in time");
+}
+
+#[tokio::test]
 async fn spawn_api_health_and_shutdown() {
     let temp = tempfile::tempdir().unwrap();
     let config_path = write_test_config(&temp);
@@ -124,4 +217,35 @@ async fn spawn_api_health_and_shutdown() {
     }
     assert!(ok, "health endpoint not reachable at {url}");
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn api_capabilities_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = write_test_config(&temp);
+    let state = test_state(&config_path);
+    let app = routes::router(state);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["name"], "soki-ci");
+    assert!(v["http"]["endpoints"].as_array().unwrap().len() >= 6);
+    let paths: Vec<_> = v["http"]["endpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"/capabilities"));
+    assert!(paths.contains(&"/projects/builds"));
 }

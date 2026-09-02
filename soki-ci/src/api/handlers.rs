@@ -2,7 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::find_project;
@@ -20,6 +20,10 @@ pub async fn health() -> Json<HealthResponse> {
         ok: true,
         service: "soki-ci",
     })
+}
+
+pub async fn capabilities() -> Json<serde_json::Value> {
+    Json(crate::capabilities::capabilities_json())
 }
 
 pub async fn list_projects_builds(
@@ -47,6 +51,33 @@ pub async fn get_job(
         .await
         .ok_or_else(|| ApiError::not_found("job not found"))?;
     Ok(Json(serde_json::json!({ "job": job })))
+}
+
+#[derive(Deserialize)]
+pub struct JobInputRequest {
+    pub text: String,
+}
+
+pub async fn send_job_input(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+    Json(body): Json<JobInputRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&job_id).map_err(|_| ApiError::bad_request("invalid job_id"))?;
+    state.jobs.send_input(id, &body.text).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") {
+            ApiError::not_found("job not found")
+        } else if msg.contains("not running") || msg.contains("stdin") {
+            ApiError::conflict(msg)
+        } else {
+            ApiError::internal(msg)
+        }
+    })?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "job_id": id,
+    })))
 }
 
 #[derive(Serialize)]

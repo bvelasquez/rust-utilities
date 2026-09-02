@@ -19,7 +19,7 @@ soki-ci   # TUI + HTTP API on 127.0.0.1:9847
 - **Quit:** warns if jobs are running; closing the TUI does **not** stop deploy children (API stops with the TUI).
 - **Runners:** `pnpm_script`, `npm_script`, `make` (runs `make <target>` in project or target `cwd`), `shell`.
 - **Voice:** `POST /v1/tts/speak` on the broker — no `broker-cli` binary required.
-- **HTTP API:** started with the TUI by default (`--bind`, default `127.0.0.1:9847`). Use `--no-api` for TUI-only, or `soki-ci serve` for API-only. `GET /projects/builds` lists configured deploy targets as `builds`; `POST /projects/{project_id}/builds/{build_id}` queues a job. Set `SOKI_CI_API_TOKEN` when binding beyond localhost.
+- **HTTP API:** started with the TUI by default (`--bind`, default `127.0.0.1:9847`). Use `--no-api` for TUI-only, or `soki-ci serve` for API-only. `GET /capabilities` returns the full agent manifest (routes, JSON schemas, CLI, env). `GET /projects/builds` lists configured deploy targets as `builds`; `POST /projects/{project_id}/builds/{build_id}` queues a job. Set `SOKI_CI_API_TOKEN` when binding beyond localhost.
 
 ## TUI navigation
 
@@ -31,6 +31,7 @@ Layout: header · **deployments** · projects | targets | output · shortcuts ·
 | Tab / mouse click | Cycle or jump panes; click rows to select |
 | `j`/`k` · wheel | Move selection / scroll log |
 | Enter | Run selected target (or open log from deployments) |
+| `i` | Type a line into the selected running job (answers `y/N` prompts) |
 | `[`/`]` · PgUp/PgDn | Scroll log (when log focused) |
 | `g`/`G` · Home/End | Jump to start / end of focused pane |
 | `r` | Reload config |
@@ -45,12 +46,22 @@ With the TUI running (or headless `serve`):
 soki-ci                                    # TUI + API
 # or: soki-ci serve                        # API only
 # or: soki-ci serve --bind 0.0.0.0:9847 --api-token "$TOKEN"
+curl -s http://127.0.0.1:9847/capabilities | jq .
 curl -s http://127.0.0.1:9847/projects/builds | jq .
 curl -s -X POST http://127.0.0.1:9847/projects/my-app/builds/hosting
 curl -s http://127.0.0.1:9847/jobs/<job_id> | jq .
+curl -s -X POST http://127.0.0.1:9847/jobs/<job_id>/input \
+  -H 'content-type: application/json' \
+  -d '{"text":"y"}'
 ```
 
 `build_id` matches the target key in `projects.yaml` (same as `soki-ci deploy run -t`). Remote starts share the TUI’s in-process job list.
+
+To answer an interactive prompt from another terminal while the TUI is up:
+
+```bash
+soki-ci jobs input -i <job_id> --text y --yes
+```
 
 ## Agents
 

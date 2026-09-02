@@ -25,9 +25,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
+    ScrollbarState,
 };
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthChar;
 use uuid::Uuid;
 
 use crate::api::ApiHandle;
@@ -36,12 +37,13 @@ use crate::config::find_project;
 use crate::jobs::{JobPhase, JobRecord};
 
 const SHORTCUTS: &str =
-    "1-4 panes  Tab  j/k · wheel  Enter run  [/] scroll  g/G top/end  r reload  x reset  q quit";
+    "1-4 panes  Tab  j/k · wheel  Enter run  i stdin  [/] scroll  g/G  r reload  x reset  q quit";
 
 enum Mode {
     Browse,
     ConfirmRun,
     ConfirmQuit,
+    StdinInput { job_id: Uuid, buffer: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -314,6 +316,25 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
                                     }
                                 }
                             }
+                            KeyCode::Char('i') => {
+                                if let Some(job) = selected_job(&jobs, &selected_job_id) {
+                                    if job.phase == JobPhase::Running
+                                        || job.phase == JobPhase::Queued
+                                    {
+                                        focus = Focus::Log;
+                                        mode = Mode::StdinInput {
+                                            job_id: job.id,
+                                            buffer: String::new(),
+                                        };
+                                        status_line = "stdin: type a reply, Enter to send".into();
+                                    } else {
+                                        status_line =
+                                            "stdin: select a running deployment first".into();
+                                    }
+                                } else {
+                                    status_line = "stdin: select a running deployment first".into();
+                                }
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break;
                             }
@@ -340,6 +361,43 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
                         Mode::ConfirmQuit => match key.code {
                             KeyCode::Char('y') => break,
                             KeyCode::Char('n') | KeyCode::Esc => mode = Mode::Browse,
+                            _ => {}
+                        },
+                        Mode::StdinInput { job_id, ref mut buffer } => match key.code {
+                            KeyCode::Esc => {
+                                mode = Mode::Browse;
+                                status_line = "stdin cancelled".into();
+                            }
+                            KeyCode::Enter => {
+                                let text = std::mem::take(buffer);
+                                let id = job_id;
+                                match ctx.jobs.send_input(id, &text).await {
+                                    Ok(()) => {
+                                        status_line = if text.is_empty() {
+                                            "sent empty line to stdin".into()
+                                        } else {
+                                            format!("sent stdin: {text}")
+                                        };
+                                        log_follow_tail = true;
+                                    }
+                                    Err(e) => {
+                                        status_line = format!("stdin failed: {e:#}");
+                                    }
+                                }
+                                mode = Mode::Browse;
+                            }
+                            KeyCode::Backspace => {
+                                buffer.pop();
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                buffer.clear();
+                            }
+                            KeyCode::Char(ch)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+                            {
+                                buffer.push(ch);
+                            }
                             _ => {}
                         },
                     }
@@ -479,12 +537,15 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
                 chunks[3],
             );
 
-            let footer = match mode {
+            let footer = match &mode {
                 Mode::Browse => status_line.clone(),
                 Mode::ConfirmRun => "Run this deploy? [y] yes  [n] cancel".to_string(),
                 Mode::ConfirmQuit => format!(
                     "{running_count} job(s) still running — quit anyway? Deploys keep running. [y] quit  [n] stay"
                 ),
+                Mode::StdinInput { buffer, .. } => {
+                    format!("stdin> {buffer}▊  Enter send  Esc cancel  Ctrl+U clear")
+                }
             };
             let foot = Paragraph::new(footer).block(Block::default().borders(Borders::ALL));
             f.render_widget(foot, chunks[4]);
@@ -807,7 +868,7 @@ fn draw_modal(f: &mut ratatui::Frame, area: Rect, mode: &Mode) {
     let text = match mode {
         Mode::ConfirmRun => "Confirm deploy",
         Mode::ConfirmQuit => "Quit with running jobs?",
-        Mode::Browse => return,
+        Mode::Browse | Mode::StdinInput { .. } => return,
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1041,17 +1102,8 @@ fn render_log(
     follow_tail: bool,
     focused: bool,
 ) -> usize {
-    let lines: Vec<Line> = if let Some(job) = job {
-        job.log_tail.iter().map(|l| style_log_line(l)).collect()
-    } else {
-        vec![Line::from(Span::styled(
-            "(select a deployment above to view output)",
-            Style::default().fg(Color::DarkGray),
-        ))]
-    };
-
     let block_title = if focused {
-        "output  [/] scroll · g top · G bottom"
+        "output  i stdin · [/] scroll · g top · G bottom"
     } else {
         "output"
     };
@@ -1060,8 +1112,28 @@ fn render_log(
         .title(block_title)
         .inner(area);
     let visible = inner.height.max(1) as usize;
+    // Wrap ourselves so scroll offsets match on-screen rows. Paragraph::wrap
+    // inflates height past `log_tail.len()`, which used to clamp before the tail.
+    let wrap_width = inner.width.max(1) as usize;
+    let lines: Vec<Line> = if let Some(job) = job {
+        job.log_tail
+            .iter()
+            .flat_map(|l| {
+                let style = log_line_style(l);
+                wrap_to_width(l, wrap_width)
+                    .into_iter()
+                    .map(move |row| Line::from(Span::styled(row, style)))
+            })
+            .collect()
+    } else {
+        vec![Line::from(Span::styled(
+            "(select a deployment above to view output)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    };
+
     let total = lines.len();
-    let max_scroll = total.saturating_sub(visible);
+    let max_scroll = log_max_scroll(total, visible);
 
     if follow_tail {
         scroll = max_scroll;
@@ -1071,7 +1143,6 @@ fn render_log(
 
     // ratatui Paragraph::scroll is (vertical, horizontal) — not (x, y).
     let p = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0))
         .block(pane_block(block_title, focused));
     f.render_widget(p, area);
@@ -1091,10 +1162,50 @@ fn render_log(
     scroll
 }
 
-fn style_log_line(line: &str) -> Line<'static> {
+/// Split `s` into rows that fit `width` display columns (unicode width).
+fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cw > 0 && current_w + cw > width && !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        current.push(ch);
+        current_w = current_w.saturating_add(cw);
+        if current_w >= width {
+            rows.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn log_max_scroll(line_count: usize, visible_rows: usize) -> usize {
+    line_count.saturating_sub(visible_rows.max(1))
+}
+
+fn log_line_style(line: &str) -> Style {
     let lower = line.to_lowercase();
-    let style = if line.starts_with("[stderr]") {
+    if line.starts_with("[stderr]") {
         Style::default().fg(Color::Yellow)
+    } else if line.starts_with("[stdin]") {
+        Style::default().fg(Color::Magenta)
     } else if lower.contains("orchestrator error")
         || lower.contains("error:")
         || lower.contains(" failed")
@@ -1117,8 +1228,7 @@ fn style_log_line(line: &str) -> Line<'static> {
         Style::default().fg(Color::Green)
     } else {
         Style::default().fg(Color::Gray)
-    };
-    Line::from(Span::styled(line.to_string(), style))
+    }
 }
 
 fn phase_style(p: JobPhase) -> Style {
@@ -1249,4 +1359,40 @@ async fn start_deploy(
     let id = ctx.jobs.enqueue(project, target).await?;
     *status = format!("started {project_id}/{target_id} ({id})");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_empty_and_short_lines() {
+        assert_eq!(wrap_to_width("", 10), vec![""]);
+        assert_eq!(wrap_to_width("hello", 10), vec!["hello"]);
+        assert_eq!(wrap_to_width("hello", 5), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_splits_on_display_width() {
+        assert_eq!(
+            wrap_to_width("abcdefghij", 4),
+            vec!["abcd", "efgh", "ij"]
+        );
+        let long = "x".repeat(50);
+        let rows = wrap_to_width(&long, 12);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.last().unwrap().len(), 2);
+        assert_eq!(rows.concat(), long);
+    }
+
+    #[test]
+    fn max_scroll_uses_wrapped_height_not_source_lines() {
+        let source_lines = 3;
+        let wrapped = wrap_to_width(&"a".repeat(40), 10).len() * source_lines;
+        let visible = 4;
+        // Old bug: max_scroll = 3 - 4 = 0, so you could never reach wrapped tail.
+        assert_eq!(source_lines.saturating_sub(visible), 0);
+        assert_eq!(log_max_scroll(wrapped, visible), wrapped - visible);
+        assert!(log_max_scroll(wrapped, visible) > 0);
+    }
 }
