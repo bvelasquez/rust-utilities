@@ -134,6 +134,11 @@ pub fn scan_targets_with_progress(
                             if !path.is_dir() && !path.is_file() {
                                 continue;
                             }
+                            if targets.iter().any(|other| {
+                                !other.expand_children && expand_path(&other.path) == path
+                            }) {
+                                continue;
+                            }
                             let name = entry.file_name().to_string_lossy().into_owned();
                             let size = dir_size(&path)?;
                             let id = format!("{}::{}", target.id, name);

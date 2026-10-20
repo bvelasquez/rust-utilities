@@ -1,11 +1,14 @@
 pub mod agent;
 pub mod analyze;
 pub mod capabilities;
+pub mod catalog;
 pub mod clean;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod dups;
 pub mod env_schema;
+pub mod organize;
 pub mod output;
 pub mod scan;
 pub mod targets;
@@ -25,6 +28,9 @@ use output::Envelope;
 pub async fn run() -> Result<()> {
     config::load_dotenv();
     let cli = Cli::parse();
+    if cli.capabilities_flag {
+        return print_capabilities(true);
+    }
     let ctx = CommandContext::from_cli(&cli)?;
 
     match cli.command {
@@ -91,14 +97,7 @@ pub async fn run() -> Result<()> {
             }
         },
         Some(Commands::Capabilities) => {
-            if cli.json {
-                Envelope::ok("capabilities", capabilities::capabilities_json()).print_json()?;
-            } else {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&capabilities::capabilities_json())?
-                );
-            }
+            print_capabilities(cli.json)?;
         }
         Some(Commands::Env { command }) => match command {
             EnvCommands::Schema => {
@@ -112,7 +111,51 @@ pub async fn run() -> Result<()> {
                 }
             }
         },
+        Some(Commands::Dups {
+            path,
+            no_recursive,
+            sha256,
+            min_bytes,
+            cross_devices,
+            exclude,
+            apply,
+            yes,
+            keep,
+        }) => {
+            commands::dups::run(
+                &ctx,
+                path,
+                no_recursive,
+                sha256,
+                min_bytes,
+                cross_devices,
+                &exclude,
+                apply,
+                yes,
+                keep,
+            )?;
+        }
+        Some(Commands::Organize {
+            once,
+            watch,
+            rules,
+            plan,
+            dry_run,
+            apply,
+        }) => {
+            commands::organize::run(&ctx, once, watch, rules, plan, dry_run, apply)?;
+        }
     }
 
+    Ok(())
+}
+
+fn print_capabilities(json: bool) -> Result<()> {
+    let catalog = capabilities::capabilities_json();
+    if json {
+        Envelope::ok("capabilities", catalog).print_json()?;
+    } else {
+        println!("{}", serde_json::to_string_pretty(&catalog)?);
+    }
     Ok(())
 }

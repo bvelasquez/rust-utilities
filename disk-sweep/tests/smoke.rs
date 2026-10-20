@@ -34,12 +34,72 @@ fn scan_json() {
 
 #[test]
 fn targets_list() {
-    Command::cargo_bin("disk-sweep")
+    let assert = Command::cargo_bin("disk-sweep")
         .unwrap()
         .args(["targets", "list", "--json"])
         .assert()
+        .success();
+    if cfg!(target_os = "macos") {
+        assert.stdout(predicate::str::contains("xcode-derived-data"));
+    } else {
+        assert
+            .stdout(predicate::str::contains("user-caches"))
+            .stdout(predicate::str::contains("thumbnail-cache"))
+            .stdout(predicate::str::contains("xcode-").not());
+    }
+}
+
+#[test]
+fn help_documents_dups_and_organize() {
+    Command::cargo_bin("disk-sweep")
+        .unwrap()
+        .arg("--help")
+        .assert()
         .success()
-        .stdout(predicate::str::contains("xcode-derived-data"));
+        .stdout(predicate::str::contains("dups"))
+        .stdout(predicate::str::contains("organize"));
+
+    Command::cargo_bin("disk-sweep")
+        .unwrap()
+        .args(["dups", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--apply"))
+        .stdout(predicate::str::contains("--no-recursive"))
+        .stdout(predicate::str::contains("--sha256"));
+
+    Command::cargo_bin("disk-sweep")
+        .unwrap()
+        .args(["organize", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--apply"))
+        .stdout(predicate::str::contains("--plan"))
+        .stdout(predicate::str::contains("--dry-run"));
+}
+
+#[test]
+fn capabilities_flag_describes_agent_workflows() {
+    for args in [vec!["--capabilities"], vec!["capabilities", "--json"]] {
+        Command::cargo_bin("disk-sweep")
+            .unwrap()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("dups"))
+            .stdout(predicate::str::contains("organize"))
+            .stdout(predicate::str::contains("defaultTargets"))
+            .stdout(predicate::str::contains("--apply"));
+    }
+}
+
+#[test]
+fn organize_watch_rejects_plan() {
+    Command::cargo_bin("disk-sweep")
+        .unwrap()
+        .args(["organize", "--watch", "--plan", "moves.yaml"])
+        .assert()
+        .failure();
 }
 
 #[test]

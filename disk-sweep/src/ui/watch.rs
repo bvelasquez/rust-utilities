@@ -489,6 +489,14 @@ pub async fn run_watch(extra_paths: &[PathBuf], volume_interval: Duration, top_n
                         mode = WatchMode::PickProjectRoot;
                         status = "select projects root for analyze".into();
                     }
+                    KeyCode::Char('d') if active_scan.is_none() && active_analyze.is_none() => {
+                        super::dups::run_dups_tui(&mut terminal)?;
+                        status = "back from duplicate scan".into();
+                    }
+                    KeyCode::Char('o') if active_scan.is_none() && active_analyze.is_none() => {
+                        super::organize::run_organize_tui(&mut terminal)?;
+                        status = "back from organizer".into();
+                    }
                     KeyCode::Char('*') | KeyCode::Char('A') if active_scan.is_none() && active_analyze.is_none() => {
                         for item in &mut snapshot.cleanup_items {
                             if item.exists {
@@ -725,6 +733,17 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, snap: &WatchSnapshot) {
         lines.push(Line::from(format!("  … and {} more", parents.len() - 6)));
     }
     lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Paths:", muted_style())));
+    let selected: Vec<_> = snap
+        .cleanup_items
+        .iter()
+        .filter(|item| item.selected)
+        .take(8)
+        .collect();
+    for item in selected {
+        lines.push(Line::from(format!("  {}", item.path.display())));
+    }
+    lines.push(Line::from(""));
     lines.push(Line::from("[y] delete   [n] cancel"));
 
     f.render_widget(
@@ -882,7 +901,7 @@ fn draw_footer(
     } else if scanning {
         "q quit (cancels scan)"
     } else {
-        "Space toggle · * all · n none · c clean · r scan · a analyze · ? help · q quit"
+        "Space toggle · * all · n none · c clean · r scan · a analyze · d duplicates · o organize · ? help · q quit"
     };
     let text = format!("{status} · {deep} · {vol_hint} · {keys}");
     f.render_widget(

@@ -1,0 +1,19 @@
+[Unit]
+Description=Personal OpenAI-compatible AI router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airouter
+Group=airouter
+ExecStart=/usr/local/bin/airouter serve --config /etc/airouter/config.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+# The config and token files should be mode 0600 and owned by this user.
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

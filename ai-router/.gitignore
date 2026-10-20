@@ -1,0 +1,7 @@
+/target
+secrets.json
+**/*.db
+**/*.db-journal
+**/*.sqlite
+**/*.sqlite-journal
+.DS_Store

@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal OpenAI-compatible AI router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@BIN@ serve
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

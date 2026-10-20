@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/config",
+    "crates/registry",
+    "crates/providers",
+    "crates/store",
+    "crates/gateway",
+    "crates/tui",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Barry Velasquez"]
+
+[workspace.dependencies]
+airouter-core = { path = "crates/core" }
+airouter-config = { path = "crates/config" }
+airouter-registry = { path = "crates/registry" }
+airouter-providers = { path = "crates/providers" }
+airouter-store = { path = "crates/store" }
+airouter-gateway = { path = "crates/gateway" }
+airouter-tui = { path = "crates/tui" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["json", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = "0.29"
+crossterm = "0.28"
+rusqlite = { version = "0.34", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+notify = "8"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["clock"] }
+futures = "0.3"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart", "blocking"] }
+async-stream = "0.3"
+wiremock = "0.6"
+tempfile = "3"
+urlencoding = "2"
+tokio-stream = "0.1"
+getrandom = "0.2"
+rpassword = "7"
+
+[profile.release]
+strip = "symbols"

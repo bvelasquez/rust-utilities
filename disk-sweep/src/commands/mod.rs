@@ -1,5 +1,7 @@
 pub mod analyze;
 pub mod clean;
+pub mod dups;
+pub mod organize;
 pub mod review;
 pub mod scan;
 pub mod targets;

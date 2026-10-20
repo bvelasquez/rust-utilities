@@ -1,0 +1,30 @@
+[package]
+name = "airouter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "airouter"
+path = "src/main.rs"
+
+[dependencies]
+airouter-config = { workspace = true }
+airouter-core = { workspace = true }
+airouter-gateway = { workspace = true }
+airouter-providers = { workspace = true }
+airouter-registry = { workspace = true }
+airouter-store = { workspace = true }
+airouter-tui = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+rpassword = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

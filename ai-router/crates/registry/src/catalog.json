@@ -1,0 +1,222 @@
+[
+  {
+    "id": "openai/gpt-4o",
+    "provider": "openai",
+    "upstream": "gpt-4o",
+    "modality": "chat",
+    "context": 128000,
+    "capabilities": ["tools", "vision", "streaming"],
+    "pricing": { "input_per_mtok": 2.5, "output_per_mtok": 10.0, "cache_read_per_mtok": 1.25 }
+  },
+  {
+    "id": "openai/gpt-4o-mini",
+    "provider": "openai",
+    "upstream": "gpt-4o-mini",
+    "modality": "chat",
+    "context": 128000,
+    "capabilities": ["tools", "vision", "streaming"],
+    "pricing": { "input_per_mtok": 0.15, "output_per_mtok": 0.6, "cache_read_per_mtok": 0.075 }
+  },
+  {
+    "id": "openai/gpt-4.1",
+    "provider": "openai",
+    "upstream": "gpt-4.1",
+    "modality": "chat",
+    "context": 1047576,
+    "capabilities": ["tools", "vision", "streaming"],
+    "pricing": { "input_per_mtok": 2.0, "output_per_mtok": 8.0, "cache_read_per_mtok": 0.5 }
+  },
+  {
+    "id": "openai/gpt-4.1-mini",
+    "provider": "openai",
+    "upstream": "gpt-4.1-mini",
+    "modality": "chat",
+    "context": 1047576,
+    "capabilities": ["tools", "vision", "streaming"],
+    "pricing": { "input_per_mtok": 0.4, "output_per_mtok": 1.6, "cache_read_per_mtok": 0.1 }
+  },
+  {
+    "id": "openai/o3-mini",
+    "provider": "openai",
+    "upstream": "o3-mini",
+    "modality": "chat",
+    "context": 200000,
+    "capabilities": ["tools", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 1.1, "output_per_mtok": 4.4 }
+  },
+  {
+    "id": "openai/text-embedding-3-small",
+    "provider": "openai",
+    "upstream": "text-embedding-3-small",
+    "modality": "embedding",
+    "context": 8191,
+    "capabilities": ["embeddings"],
+    "pricing": { "embedding_per_mtok": 0.02 }
+  },
+  {
+    "id": "openai/text-embedding-3-large",
+    "provider": "openai",
+    "upstream": "text-embedding-3-large",
+    "modality": "embedding",
+    "context": 8191,
+    "capabilities": ["embeddings"],
+    "pricing": { "embedding_per_mtok": 0.13 }
+  },
+  {
+    "id": "openai/dall-e-3",
+    "provider": "openai",
+    "upstream": "dall-e-3",
+    "modality": "image",
+    "capabilities": ["image"],
+    "pricing": { "per_image": 0.04 }
+  },
+  {
+    "id": "openai/gpt-image-1",
+    "provider": "openai",
+    "upstream": "gpt-image-1",
+    "modality": "image",
+    "capabilities": ["image"],
+    "pricing": { "per_image": 0.04 }
+  },
+  {
+    "id": "openai/tts-1",
+    "provider": "openai",
+    "upstream": "tts-1",
+    "modality": "audio_tts",
+    "capabilities": ["audio"],
+    "pricing": { "per_1k_chars": 0.015 }
+  },
+  {
+    "id": "openai/gpt-4o-mini-tts",
+    "provider": "openai",
+    "upstream": "gpt-4o-mini-tts",
+    "modality": "audio_tts",
+    "capabilities": ["audio"],
+    "pricing": { "per_1k_chars": 0.015 }
+  },
+  {
+    "id": "openai/whisper-1",
+    "provider": "openai",
+    "upstream": "whisper-1",
+    "modality": "audio_stt",
+    "capabilities": ["audio"],
+    "pricing": { "per_minute": 0.006 }
+  },
+  {
+    "id": "anthropic/claude-sonnet-4-5",
+    "provider": "anthropic",
+    "upstream": "claude-sonnet-4-5",
+    "modality": "chat",
+    "context": 200000,
+    "capabilities": ["tools", "vision", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75 }
+  },
+  {
+    "id": "anthropic/claude-opus-4-1",
+    "provider": "anthropic",
+    "upstream": "claude-opus-4-1",
+    "modality": "chat",
+    "context": 200000,
+    "capabilities": ["tools", "vision", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75 }
+  },
+  {
+    "id": "anthropic/claude-3-5-haiku-latest",
+    "provider": "anthropic",
+    "upstream": "claude-3-5-haiku-latest",
+    "modality": "chat",
+    "context": 200000,
+    "capabilities": ["tools", "vision", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 0.8, "output_per_mtok": 4.0, "cache_read_per_mtok": 0.08, "cache_write_per_mtok": 1.0 }
+  },
+  {
+    "id": "gemini/gemini-2.5-pro",
+    "provider": "gemini",
+    "upstream": "gemini-2.5-pro",
+    "modality": "chat",
+    "context": 1048576,
+    "capabilities": ["tools", "vision", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 1.25, "output_per_mtok": 10.0 }
+  },
+  {
+    "id": "gemini/gemini-2.5-flash",
+    "provider": "gemini",
+    "upstream": "gemini-2.5-flash",
+    "modality": "chat",
+    "context": 1048576,
+    "capabilities": ["tools", "vision", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 0.15, "output_per_mtok": 0.6 }
+  },
+  {
+    "id": "gemini/text-embedding-004",
+    "provider": "gemini",
+    "upstream": "text-embedding-004",
+    "modality": "embedding",
+    "context": 2048,
+    "capabilities": ["embeddings"],
+    "pricing": { "embedding_per_mtok": 0.1 }
+  },
+  {
+    "id": "groq/llama-3.3-70b-versatile",
+    "provider": "groq",
+    "upstream": "llama-3.3-70b-versatile",
+    "modality": "chat",
+    "context": 128000,
+    "capabilities": ["tools", "streaming"],
+    "pricing": { "input_per_mtok": 0.59, "output_per_mtok": 0.79 }
+  },
+  {
+    "id": "deepseek/deepseek-flash",
+    "provider": "deepseek",
+    "upstream": "deepseek-flash",
+    "modality": "chat",
+    "context": 1000000,
+    "capabilities": ["tools", "vision", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 0.3, "output_per_mtok": 1.2, "cache_read_per_mtok": 0.006 }
+  },
+  {
+    "id": "deepseek/deepseek-v4-pro",
+    "provider": "deepseek",
+    "upstream": "deepseek-v4-pro",
+    "modality": "chat",
+    "context": 1000000,
+    "capabilities": ["tools", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 1.32, "output_per_mtok": 3.96, "cache_read_per_mtok": 0.044 }
+  },
+  {
+    "id": "deepseek/deepseek-chat",
+    "provider": "deepseek",
+    "upstream": "deepseek-chat",
+    "modality": "chat",
+    "context": 64000,
+    "capabilities": ["tools", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 0.27, "output_per_mtok": 1.1, "cache_read_per_mtok": 0.07 }
+  },
+  {
+    "id": "mistral/mistral-large-latest",
+    "provider": "mistral",
+    "upstream": "mistral-large-latest",
+    "modality": "chat",
+    "context": 128000,
+    "capabilities": ["tools", "streaming"],
+    "pricing": { "input_per_mtok": 2.0, "output_per_mtok": 6.0 }
+  },
+  {
+    "id": "xai/grok-3",
+    "provider": "xai",
+    "upstream": "grok-3",
+    "modality": "chat",
+    "context": 131072,
+    "capabilities": ["tools", "streaming", "reasoning"],
+    "pricing": { "input_per_mtok": 3.0, "output_per_mtok": 15.0 }
+  },
+  {
+    "id": "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "provider": "together",
+    "upstream": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "modality": "chat",
+    "context": 131072,
+    "capabilities": ["tools", "streaming"],
+    "pricing": { "input_per_mtok": 0.88, "output_per_mtok": 0.88 }
+  }
+]

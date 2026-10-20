@@ -100,13 +100,21 @@ pub enum ScanUpdate {
 
 pub fn default_watch_paths() -> Vec<(String, PathBuf)> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let candidates = [
-        ("Developer", home.join("Library/Developer")),
-        ("Xcode", home.join("Library/Developer/Xcode")),
-        ("Caches", home.join("Library/Caches")),
-        ("Projects", home.join("projects")),
-        ("Downloads", home.join("Downloads")),
-    ];
+    let candidates: Vec<(&str, PathBuf)> = if cfg!(target_os = "macos") {
+        vec![
+            ("Developer", home.join("Library/Developer")),
+            ("Xcode", home.join("Library/Developer/Xcode")),
+            ("Caches", home.join("Library/Caches")),
+            ("Projects", home.join("projects")),
+            ("Downloads", home.join("Downloads")),
+        ]
+    } else {
+        vec![
+            ("Cache", crate::targets::xdg_cache_dir()),
+            ("Projects", home.join("projects")),
+            ("Downloads", home.join("Downloads")),
+        ]
+    };
 
     candidates
         .into_iter()

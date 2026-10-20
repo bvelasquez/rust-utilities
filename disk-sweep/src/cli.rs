@@ -6,13 +6,21 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "disk-sweep",
     version,
-    about = "Agent-first smart disk cleanup — scan caches, Xcode junk, and review folders with LLM",
-    after_help = "Agents: run `disk-sweep capabilities --json` and `disk-sweep env schema --json`.\n\
-        Interactive TUI opens by default in a TTY. Use `scan --json` for automation."
+    about = "Agent-first disk cleanup, duplicate scan, and folder organizer",
+    after_help = "Agents: run `disk-sweep --capabilities` or `disk-sweep capabilities --json`.\n\
+        Interactive TUI opens by default in a TTY. Use `scan --json` for automation.\n\
+        `dups` finds duplicate files. `organize` moves files using ~/.config/disk-sweep/rules.yaml."
 )]
 pub struct Cli {
     #[arg(long, global = true, help = "Structured JSON envelope output")]
     pub json: bool,
+
+    #[arg(
+        long = "capabilities",
+        global = true,
+        help = "Print the agent capability catalog as JSON and exit"
+    )]
+    pub capabilities_flag: bool,
 
     #[arg(long, global = true, env = "DISK_SWEEP_CONFIG", help = "Config file path")]
     pub config: Option<PathBuf>,
@@ -109,13 +117,90 @@ pub enum Commands {
         #[command(subcommand)]
         command: TargetsCommands,
     },
-    /// Machine-readable command catalog
+    /// Machine-readable command catalog for agents
     Capabilities,
+    /// Find duplicate files under a folder. Read-only unless --apply.
+    Dups {
+        /// Folder to scan. Omit in a terminal to browse and pick a folder.
+        path: Option<PathBuf>,
+
+        /// Stay in the top directory instead of walking subdirectories
+        #[arg(long)]
+        no_recursive: bool,
+
+        /// Confirm full-hash matches with SHA-256
+        #[arg(long)]
+        sha256: bool,
+
+        /// Skip files smaller than this many bytes (0 includes empty files)
+        #[arg(long, default_value_t = 1)]
+        min_bytes: u64,
+
+        /// Also scan mounted filesystems under the folder
+        #[arg(long)]
+        cross_devices: bool,
+
+        /// Folder to leave out of the scan. Repeat for more than one. Everything inside is ignored.
+        #[arg(long, value_name = "DIR")]
+        exclude: Vec<PathBuf>,
+
+        /// Delete extra copies. The scan stays read-only without this flag.
+        /// A terminal must type delete. A non-terminal also needs --yes.
+        #[arg(long)]
+        apply: bool,
+
+        /// Required with --apply when stdout is not a terminal
+        #[arg(long)]
+        yes: bool,
+
+        /// Which copy to keep when --apply deletes the others
+        #[arg(long, value_enum, default_value_t = DupKeep::Shortest)]
+        keep: DupKeep,
+    },
+    /// Move files from source folders using a YAML rules file.
+    /// SHA-256 of each file is checked against ~/.local/share/disk-sweep/organize-catalog.sqlite.
+    /// Content already stored is moved to dest_root/duplicates/ instead of the library.
+    Organize {
+        /// Walk each source once and move matches immediately
+        #[arg(long, conflicts_with_all = ["watch", "apply"])]
+        once: bool,
+
+        /// Watch source folders and move files as they arrive. Cannot be combined with --plan, --dry-run, or --apply.
+        #[arg(long, conflicts_with_all = ["once", "apply", "plan", "dry_run"])]
+        watch: bool,
+
+        /// Rules file (default: ~/.config/disk-sweep/rules.yaml)
+        #[arg(long)]
+        rules: Option<PathBuf>,
+
+        /// Write a YAML or Markdown plan and do not move files. Same as --dry-run. Not valid with --watch.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["watch", "apply", "dry_run"])]
+        plan: Option<PathBuf>,
+
+        /// Write a YAML or Markdown plan and do not move files. Same as --plan. Not valid with --watch.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["watch", "apply", "plan"])]
+        dry_run: Option<PathBuf>,
+
+        /// Move only the files recorded in a plan from --plan or --dry-run
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["watch", "once", "plan", "dry_run"])]
+        apply: Option<PathBuf>,
+    },
     /// Environment variable schema
     Env {
         #[command(subcommand)]
         command: EnvCommands,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum DupKeep {
+    /// Keep the copy with the shortest path
+    #[default]
+    Shortest,
+    /// Keep the copy with the newest modified time
+    Newest,
+    /// Keep the copy with the oldest modified time
+    Oldest,
 }
 
 #[derive(Debug, Subcommand)]

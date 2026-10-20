@@ -1,0 +1,55 @@
+{
+  "server": {
+    "listen": "0.0.0.0:8787",
+    "admin_listen": "127.0.0.1:8788",
+    "api_keys": [
+      { "key": "file:~/.config/airouter/token", "label": "local" }
+    ],
+    "retry": { "max_retries": 2, "backoff_ms": 200 }
+  },
+  "providers": {
+    "openai": { "type": "openai", "api_key": "env:OPENAI_API_KEY" },
+    "anthropic": { "type": "anthropic", "api_key": "env:ANTHROPIC_API_KEY" },
+    "gemini": { "type": "gemini", "api_key": "env:GEMINI_API_KEY" },
+    "groq": {
+      "type": "openai_compat",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key": "env:GROQ_API_KEY"
+    },
+    "deepseek": {
+      "type": "openai_compat",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "env:DEEPSEEK_API_KEY"
+    },
+    "xai": {
+      "type": "openai_compat",
+      "base_url": "https://api.x.ai/v1",
+      "api_key": "env:XAI_API_KEY"
+    },
+    "deepinfra": {
+      "type": "openai_compat",
+      "base_url": "https://api.deepinfra.com/v1/openai",
+      "api_key": "env:DEEPINFRA_API_KEY"
+    },
+    "ollama": {
+      "type": "openai_compat",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": null
+    }
+  },
+  "models": [
+    {
+      "id": "openai/gpt-4o-mini",
+      "provider": "openai",
+      "upstream": "gpt-4o-mini",
+      "modality": "chat",
+      "enabled": true,
+      "context": 128000,
+      "capabilities": ["tools", "vision", "streaming"],
+      "pricing": { "input_per_mtok": 0.15, "output_per_mtok": 0.6 }
+    }
+  ],
+  "aliases": {
+    "fast": "openai/gpt-4o-mini"
+  }
+}

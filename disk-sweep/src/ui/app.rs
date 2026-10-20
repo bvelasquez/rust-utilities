@@ -412,6 +412,14 @@ pub fn run_interactive() -> Result<()> {
                                 mode = Mode::PickProjectRoot;
                                 status = "Select projects root for analyze".into();
                             }
+                            KeyCode::Char('d') => {
+                                super::dups::run_dups_tui(&mut terminal)?;
+                                status = "Back from duplicate scan".into();
+                            }
+                            KeyCode::Char('o') => {
+                                super::organize::run_organize_tui(&mut terminal)?;
+                                status = "Back from organizer".into();
+                            }
                             KeyCode::Char('c') => {
                                 let selected = all_selected_items(&report);
                                 if selected.is_empty() {
@@ -641,7 +649,7 @@ fn draw(
         Mode::Cleaning => "cleaning…",
         Mode::Scanning => "scanning…",
         Mode::Browse => {
-            "Tab · Space toggle · * all · n none · a analyze · r rescan · c clean · q quit"
+            "Tab · Space toggle · * all · n none · a analyze · d duplicates · o organize · r rescan · c clean · q quit"
         }
     };
 
@@ -678,13 +686,14 @@ fn draw(
     }
 
     if matches!(mode, Mode::ConfirmClean) {
-        let popup = centered_rect(60, 20, area);
+        let popup = centered_rect(70, 50, area);
         let inner = draw_modal_panel(f, popup, "Confirm cleanup", Color::Red);
         fill_rects(f, &[inner], modal_surface_style());
         let prompt = Paragraph::new(format!(
-            "Delete {} selected items?\nReclaim ~{}\n\nThis cannot be undone.\n\n[y] yes  [n] no",
+            "Delete {} selected items?\nReclaim ~{}\n\n{}\n\nThis cannot be undone.\n\n[y] yes  [n] no",
             report.selected_count,
             format_bytes(report.selected_bytes),
+            selected_preview(report),
         ))
         .style(modal_surface_style())
         .wrap(Wrap { trim: true });
@@ -700,6 +709,24 @@ fn draw(
     if let Some(cp) = clean_progress {
         draw_clean_overlay(f, area, cp);
     }
+}
+
+fn selected_preview(report: &ScanReport) -> String {
+    let mut lines = Vec::new();
+    for item in report
+        .categories
+        .iter()
+        .flat_map(|cat| cat.items.iter())
+        .filter(|item| item.selected && item.exists)
+        .take(8)
+    {
+        lines.push(format!("{} ({})", item.path.display(), format_bytes(item.size_bytes)));
+    }
+    let extra = report.selected_count.saturating_sub(8);
+    if extra > 0 {
+        lines.push(format!("… and {extra} more"));
+    }
+    lines.join("\n")
 }
 
 fn short_path(path: &std::path::Path) -> String {

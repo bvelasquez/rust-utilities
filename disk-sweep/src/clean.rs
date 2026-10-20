@@ -133,12 +133,16 @@ pub fn clean_items_with_progress(
 }
 
 fn remove_path(path: &Path) -> Result<()> {
-    if path.is_dir() {
+    let meta = fs::symlink_metadata(path).with_context(|| format!("missing {}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!("refusing to delete symlink {}", path.display());
+    }
+    if meta.is_dir() {
         fs::remove_dir_all(path)?;
-    } else if path.is_file() {
+    } else if meta.is_file() {
         fs::remove_file(path)?;
-    } else if path.exists() {
-        fs::remove_file(path)?;
+    } else {
+        bail!("refusing to delete special file {}", path.display());
     }
     Ok(())
 }
@@ -277,5 +281,20 @@ mod tests {
         let report = clean_items(&[test_item(file.clone())], false).unwrap();
         assert!(!file.exists());
         assert_eq!(report.deleted_count, 1);
+    }
+
+    #[test]
+    fn clean_refuses_symlink() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("cache.bin");
+        let mut f = fs::File::create(&file).unwrap();
+        f.write_all(b"data").unwrap();
+        let link = dir.path().join("link.bin");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let report = clean_items(&[test_item(link.clone())], false).unwrap();
+        assert_eq!(report.deleted_count, 0);
+        assert_eq!(report.error_count, 1);
+        assert!(file.exists());
+        assert!(link.exists());
     }
 }

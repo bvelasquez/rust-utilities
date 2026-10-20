@@ -238,15 +238,21 @@ fn scan_library(
     cancel: &AtomicBool,
     tx: &SyncSender<ScanUpdate>,
 ) -> Result<Vec<ScanItem>> {
-    let library = home.join("Library");
+    let zones: Vec<(&str, PathBuf)> = if cfg!(target_os = "macos") {
+        let library = home.join("Library");
+        vec![
+            ("Application Support", library.join("Application Support")),
+            ("Containers", library.join("Containers")),
+            ("Caches", library.join("Caches")),
+            ("Logs", library.join("Logs")),
+        ]
+    } else {
+        vec![
+            ("Cache", crate::targets::xdg_cache_dir()),
+            ("Local Share", home.join(".local/share")),
+        ]
+    };
     let mut items = Vec::new();
-
-    let zones = [
-        ("Application Support", library.join("Application Support")),
-        ("Containers", library.join("Containers")),
-        ("Caches", library.join("Caches")),
-        ("Logs", library.join("Logs")),
-    ];
 
     for (zone, root) in zones {
         if cancel.load(Ordering::Relaxed) {
@@ -649,7 +655,7 @@ fn library_entry_hint(zone: &str, name: &str) -> (&'static str, &'static str) {
     let safe_names = [
         "cache", "caches", "logs", "crashpad", "shipit", "updates", "temp",
     ];
-    if zone == "Caches" || zone == "Logs" {
+    if zone == "Caches" || zone == "Logs" || zone == "Cache" {
         return (
             "safe_cleanup",
             "Library cache/log data — apps recreate as needed",
