@@ -197,7 +197,7 @@ fn http_endpoints() -> Value {
                 },
                 { "status": 401, "description": "Missing or invalid Bearer token", "schema": error },
                 { "status": 404, "description": "Unknown project_id or build_id", "schema": error },
-                { "status": 409, "description": "Project/target already has a queued or running deploy", "schema": error },
+                { "status": 409, "description": "Project already has a queued or running deploy (deploys are serialized per project, since targets of one project share a working tree)", "schema": error },
                 { "status": 500, "description": "Enqueue or config error", "schema": error }
             ]
         },

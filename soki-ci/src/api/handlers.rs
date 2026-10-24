@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::find_project;
+use crate::jobs::DeployConflict;
 
 use super::ApiState;
 
@@ -103,13 +104,17 @@ pub async fn trigger_build(
         ))
     })?;
 
-    let job_id = state.jobs.enqueue(project, target).await.map_err(|e| {
-        if e.to_string().contains("already has a running or queued deploy") {
-            ApiError::conflict(e.to_string())
-        } else {
-            ApiError::internal(e.to_string())
-        }
-    })?;
+    let job_id = state
+        .jobs
+        .enqueue(project, target)
+        .await
+        .map_err(|e| {
+            if e.downcast_ref::<DeployConflict>().is_some() {
+                ApiError::conflict(e.to_string())
+            } else {
+                ApiError::internal(e.to_string())
+            }
+        })?;
 
     Ok((
         StatusCode::ACCEPTED,

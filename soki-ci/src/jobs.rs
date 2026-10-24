@@ -53,15 +53,38 @@ pub struct JobOrchestrator {
     max_history: usize,
 }
 
-fn deploy_slot_key(project_id: &str, target_id: &str) -> String {
-    format!("{project_id}/{target_id}")
+/// Returned by [`JobOrchestrator::enqueue`] when the project already has an
+/// active deploy. Callers map this to HTTP 409; matching on the message text
+/// instead is what silently turned every conflict into a 500.
+#[derive(Debug)]
+pub struct DeployConflict(pub String);
+
+impl std::fmt::Display for DeployConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DeployConflict {}
+
+/// Deploys are serialized per **project**, not per target.
+///
+/// Targets of the same project share one working tree and build into the same
+/// output directory (`packages/web/dist`, `dist-ssr`, ...). Running e.g.
+/// `hosting` and `functions` concurrently makes each job's build delete the
+/// other's intermediates — `vite build` empties `dist/`, so one job fails with
+/// "dist/index.html missing" or "SSR bundle missing" while the other succeeds.
+/// Jobs across *different* projects still run in parallel (subject to
+/// `defaults.max_parallel`); only same-project overlap is refused.
+fn project_slot_key(project_id: &str) -> String {
+    project_id.to_string()
 }
 
 struct OrchestratorInner {
     jobs: HashMap<Uuid, JobRecord>,
     order: Vec<Uuid>,
-    /// One active (queued or running) job per project/target pair.
-    target_running: HashMap<String, Uuid>,
+    /// One active (queued or running) job per project.
+    project_active: HashMap<String, Uuid>,
     /// Writers for running child stdin (prompts like y/N).
     stdin: HashMap<Uuid, mpsc::Sender<Vec<u8>>>,
 }
@@ -86,10 +109,10 @@ impl OrchestratorInner {
         }
     }
 
-    fn clear_target_slot(&mut self, project_id: &str, target_id: &str, job_id: Uuid) {
-        let key = deploy_slot_key(project_id, target_id);
-        if self.target_running.get(&key) == Some(&job_id) {
-            self.target_running.remove(&key);
+    fn clear_project_slot(&mut self, project_id: &str, job_id: Uuid) {
+        let key = project_slot_key(project_id);
+        if self.project_active.get(&key) == Some(&job_id) {
+            self.project_active.remove(&key);
         }
     }
 }
@@ -103,7 +126,7 @@ impl JobOrchestrator {
             inner: Arc::new(Mutex::new(OrchestratorInner {
                 jobs: HashMap::new(),
                 order: Vec::new(),
-                target_running: HashMap::new(),
+                project_active: HashMap::new(),
                 stdin: HashMap::new(),
             })),
             semaphore: Arc::new(Semaphore::new(permits)),
@@ -145,7 +168,7 @@ impl JobOrchestrator {
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let log_path = log_path_for(&id)?;
-        let slot = deploy_slot_key(&project.id, &target.id);
+        let slot = project_slot_key(&project.id);
         let mut record = JobRecord {
             id,
             project_id: project.id.clone(),
@@ -170,7 +193,6 @@ impl JobOrchestrator {
         let speak = self.speak.clone();
         let broker = self.broker.clone();
         let project_id = project.id.clone();
-        let target_id = target.id.clone();
         let project_name = project.name.clone();
         let target_label = target.label.clone();
         let target_speak = target.speak;
@@ -179,16 +201,21 @@ impl JobOrchestrator {
 
         {
             let mut g = self.inner.lock().await;
-            if g.target_running.contains_key(&slot) {
-                bail!(
-                    "target `{}/{}` already has a running or queued deploy",
-                    project.id,
-                    target.id
+            if let Some(active) = g.project_active.get(&slot) {
+                let active_target = g
+                    .jobs
+                    .get(active)
+                    .map(|j| j.target_id.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let msg = format!(
+                    "project `{}` already has a `{}` deploy running or queued. Targets of one project share a working tree and cannot build concurrently, so wait for it to finish and then deploy `{}`.",
+                    project.id, active_target, target.id
                 );
+                return Err(anyhow::Error::new(DeployConflict(msg)));
             }
             g.jobs.insert(id, record);
             g.order.insert(0, id);
-            g.target_running.insert(slot, id);
+            g.project_active.insert(slot, id);
             g.stdin.insert(id, in_tx);
             g.trim_history(self.max_history);
         }
@@ -204,7 +231,6 @@ impl JobOrchestrator {
                 inner.clone(),
                 in_rx,
                 project_id.clone(),
-                target_id.clone(),
                 project_name,
                 target_label,
                 target_speak,
@@ -220,7 +246,7 @@ impl JobOrchestrator {
                     j.push_log(format!("orchestrator error: {e}"));
                 }
                 g.stdin.remove(&id);
-                g.clear_target_slot(&project_id, &target_id, id);
+                g.clear_project_slot(&project_id, id);
             }
         });
 
@@ -259,11 +285,10 @@ impl JobOrchestrator {
             bail!("job is not running");
         }
         let project_id = job.project_id.clone();
-        let target_id = job.target_id.clone();
         job.phase = JobPhase::Cancelled;
         job.finished_at = Some(Utc::now());
         g.stdin.remove(&id);
-        g.clear_target_slot(&project_id, &target_id, id);
+        g.clear_project_slot(&project_id, id);
         Ok(())
     }
 
@@ -313,7 +338,6 @@ async fn run_job(
     inner: Arc<Mutex<OrchestratorInner>>,
     mut in_rx: mpsc::Receiver<Vec<u8>>,
     project_id: String,
-    target_id: String,
     project_name: String,
     target_label: String,
     target_speak: Option<bool>,
@@ -323,7 +347,7 @@ async fn run_job(
     {
         let mut g = inner.lock().await;
         let Some(job) = g.jobs.get_mut(&id) else {
-            g.clear_target_slot(&project_id, &target_id, id);
+            g.clear_project_slot(&project_id, id);
             return Ok(());
         };
         job.phase = JobPhase::Running;
@@ -400,7 +424,7 @@ async fn run_job(
             job.push_log(format!("finished: exit {code}"));
         }
         g.stdin.remove(&id);
-        g.clear_target_slot(&project_id, &target_id, id);
+        g.clear_project_slot(&project_id, id);
     }
 
     if should_speak {

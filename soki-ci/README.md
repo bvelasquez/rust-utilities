@@ -1,6 +1,6 @@
 # soki-ci
 
-Multi-project deploy control panel: user-wide YAML registry, parallel deploy jobs across repos, ratatui dashboard, HTTP broker TTS on success/failure, and an HTTP API to trigger builds remotely (embedded in the TUI by default).
+Multi-project deploy control panel: user-wide YAML registry, parallel deploy jobs across repos (targets of the *same* project are serialized — they share one working tree and build into the same output dir), ratatui dashboard, HTTP broker TTS on success/failure, and an HTTP API to trigger builds remotely (embedded in the TUI by default).
 
 ## Quick start
 
