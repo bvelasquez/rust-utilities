@@ -9,7 +9,7 @@ Useful when you work across many repos under `~/projects` and want a single comm
 - Discovers git repos under a root directory (default `~/projects`, depth 1)
 - Filters to **your** repos by default (remote owner matches configured GitHub/GitLab users, or no remote)
 - Reports dirty state with porcelain details, ahead/behind counts, and branch info
-- Optionally **stage all**, **commit**, and **push** across every repo that needs it
+- Optionally **fetch**, **pull/rebase**, **stage all**, **commit**, and **push** across every repo that needs it
 - Emits JSON for scripts and CI (`--json`, `--strict`)
 
 ## Install
@@ -35,6 +35,19 @@ git-sweep --json --strict   # exit 1 if any repo has issues
 git-sweep --commit --push --yes --message "chore: sync uncommitted work"
 git-sweep --commit --dry-run   # preview without changes
 ```
+
+**Get repos up to date with origin:**
+
+```bash
+git-sweep --fetch             # refresh remote refs, then report accurate ahead/behind
+git-sweep --pull --yes        # fast-forward repos that are behind (skips dirty repos)
+git-sweep --pull --rebase --yes   # rebase local commits on top of upstream when diverged
+```
+
+`--pull` fetches first. Dirty repos are skipped with a warning; use `--commit --pull`
+to commit your work first, then pull (and add `--push` to publish afterwards).
+With `--rebase`, conflicts stop that repo mid-rebase — resolve them and run
+`git rebase --continue` (or `git rebase --abort`) in that repo.
 
 **Include third-party clones:**
 
@@ -77,7 +90,7 @@ exclude = ["vendor-mirror"]
 |------|---------|
 | 0 | Success (or `--strict` with no issues) |
 | 1 | `--strict` and at least one repo has actionable issues |
-| 2 | One or more repos failed during `--commit` / `--push` |
+| 2 | One or more repos failed during `--commit` / `--push` / `--pull` |
 
 ## Example output
 

@@ -59,6 +59,18 @@ struct Cli {
     #[arg(long, requires = "commit")]
     push: bool,
 
+    /// Fetch from remotes before reporting, so ahead/behind counts are accurate
+    #[arg(long)]
+    fetch: bool,
+
+    /// Bring repos that are behind upstream up to date (implies --fetch)
+    #[arg(long, conflicts_with = "report")]
+    pull: bool,
+
+    /// Rebase local commits when pulling, instead of fast-forward-only
+    #[arg(long, requires = "pull")]
+    rebase: bool,
+
     /// Commit message when using --commit
     #[arg(long, default_value = "chore: sync uncommitted work")]
     message: String,
@@ -631,6 +643,177 @@ fn commit_repo(repo: &Path, message: &str, push: bool, dry_run: bool, yes: bool)
     Ok(())
 }
 
+fn pull_repos(
+    reports: &[RepoReport],
+    rebase: bool,
+    dry_run: bool,
+    yes: bool,
+    json: bool,
+) -> Result<usize> {
+    struct Target {
+        path: PathBuf,
+        name: String,
+        behind: u32,
+    }
+
+    let mut targets = Vec::new();
+    for r in reports {
+        if r.remote.is_none() {
+            continue;
+        }
+        let path = Path::new(&r.path);
+        let (branch, detached, no_upstream) = branch_info(path);
+        if branch.is_none() || detached || no_upstream {
+            continue;
+        }
+        let behind = ahead_behind(path).1.unwrap_or(0);
+        if behind == 0 {
+            continue;
+        }
+        let dirty = !run_git(path, &["status", "--porcelain"])
+            .unwrap_or_default()
+            .is_empty();
+        if dirty {
+            if !json {
+                eprintln!(
+                    "{} skipping {} — uncommitted changes (commit first or use --commit)",
+                    "warning".yellow(),
+                    r.name
+                );
+            }
+            continue;
+        }
+        targets.push(Target {
+            path: path.to_path_buf(),
+            name: r.name.clone(),
+            behind,
+        });
+    }
+
+    if targets.is_empty() {
+        if !json {
+            println!("Nothing to pull.");
+        }
+        return Ok(0);
+    }
+
+    if !json {
+        println!("\n{} repo(s) behind upstream\n", targets.len());
+    }
+
+    if dry_run {
+        for t in &targets {
+            let how = if rebase { "rebase" } else { "fast-forward" };
+            println!(
+                "[dry-run] would {how} {} (behind {} commit(s))",
+                t.path.display(),
+                t.behind
+            );
+        }
+        return Ok(0);
+    }
+
+    let detail = if rebase {
+        "git pull --rebase"
+    } else {
+        "git pull --ff-only"
+    };
+    if !confirm(
+        &format!("Bring {} repo(s) up to date ({detail})?", targets.len()),
+        yes,
+    )? {
+        return Ok(0);
+    }
+
+    let mut errors = 0usize;
+    for t in &targets {
+        let args: &[&str] = if rebase {
+            &["pull", "--rebase"]
+        } else {
+            &["pull", "--ff-only"]
+        };
+        match run_git(&t.path, args) {
+            Ok(_) => {
+                if !json {
+                    let what = if rebase { "rebased" } else { "fast-forwarded" };
+                    println!("{} {what} {}", "✓".green(), t.path.display());
+                }
+            }
+            Err(e) => {
+                errors += 1;
+                eprintln!("{} {}: {e:#}", "error".red(), t.name);
+                if rebase {
+                    eprintln!(
+                        "  {} resolve conflicts in {}, then `git rebase --continue` (or `git rebase --abort`)",
+                        "note:".yellow(),
+                        t.path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    if !json {
+        println!(
+            "\nDone: {} updated, {errors} error(s)",
+            targets.len() - errors
+        );
+    }
+    Ok(errors)
+}
+
+fn push_repos(reports: &[RepoReport], dry_run: bool, yes: bool, json: bool) -> Result<usize> {
+    let mut targets = Vec::new();
+    for r in reports {
+        let path = Path::new(&r.path);
+        let (branch, detached, no_upstream) = branch_info(path);
+        if branch.is_none() || detached || no_upstream {
+            continue;
+        }
+        let ahead = ahead_behind(path).0.unwrap_or(0);
+        if ahead > 0 {
+            targets.push((path.to_path_buf(), r.name.clone(), ahead));
+        }
+    }
+
+    if targets.is_empty() {
+        if !json {
+            println!("Nothing to push.");
+        }
+        return Ok(0);
+    }
+
+    if dry_run {
+        for (p, _, ahead) in &targets {
+            println!("[dry-run] would push {ahead} commit(s) in {}", p.display());
+        }
+        return Ok(0);
+    }
+
+    if !confirm(
+        &format!("Push {} repo(s) with unpushed commits?", targets.len()),
+        yes,
+    )? {
+        return Ok(0);
+    }
+
+    let mut errors = 0usize;
+    for (path, name, _) in &targets {
+        match run_git(path, &["push"]) {
+            Ok(_) => {
+                if !json {
+                    println!("{} pushed {}", "->".green(), path.display());
+                }
+            }
+            Err(e) => {
+                errors += 1;
+                eprintln!("{} {}: {e:#}", "error".red(), name);
+            }
+        }
+    }
+    Ok(errors)
+}
+
 fn partition_repos(
     repo_paths: Vec<PathBuf>,
     filter: &RepoFilter,
@@ -672,7 +855,7 @@ fn main() -> Result<()> {
 
     let filter = load_repo_filter(&cli)?;
 
-    let report_only = !cli.commit;
+    let report_only = !cli.commit && !cli.pull;
     if report_only && cli.push {
         bail!("--push requires --commit");
     }
@@ -680,6 +863,35 @@ fn main() -> Result<()> {
     let all_repo_paths = find_git_repos(&root, cli.depth);
     let scanned = all_repo_paths.len();
     let (included_paths, skipped) = partition_repos(all_repo_paths, &filter);
+
+    // Refresh remote-tracking refs before inspecting, so behind counts are real.
+    if cli.fetch || cli.pull {
+        if cli.dry_run {
+            if !cli.json {
+                println!("[dry-run] would fetch remotes");
+            }
+        } else {
+            let results: Vec<(PathBuf, Result<String>)> = included_paths
+                .par_iter()
+                .filter(|(_, _, remote, _)| remote.is_some())
+                .map(|(p, _, _, _)| (p.clone(), run_git(p, &["fetch"])))
+                .collect();
+            let mut fetched = 0usize;
+            for (p, res) in results {
+                match res {
+                    Ok(_) => fetched += 1,
+                    Err(e) => eprintln!(
+                        "{} fetch failed for {}: {e:#}",
+                        "warning".yellow(),
+                        p.display()
+                    ),
+                }
+            }
+            if !cli.json {
+                println!("Fetched {fetched} repo(s)");
+            }
+        }
+    }
 
     let reports: Vec<RepoReport> = included_paths
         .par_iter()
@@ -744,11 +956,14 @@ fn main() -> Result<()> {
 
         let ok = AtomicUsize::new(0);
         let err = AtomicUsize::new(0);
+        // When pulling, hold pushes until after the pull step so we don't
+        // reject a non-fast-forward push we could have rebased first.
+        let push_during_commit = cli.push && !cli.pull;
         for r in to_process {
             match commit_repo(
                 Path::new(&r.path),
                 &cli.message,
-                cli.push,
+                push_during_commit,
                 cli.dry_run,
                 cli.yes,
             ) {
@@ -769,6 +984,16 @@ fn main() -> Result<()> {
             );
         }
         if err.load(Ordering::Relaxed) > 0 {
+            std::process::exit(2);
+        }
+    }
+
+    if cli.pull {
+        let mut action_errors = pull_repos(&reports, cli.rebase, cli.dry_run, cli.yes, cli.json)?;
+        if cli.push {
+            action_errors += push_repos(&reports, cli.dry_run, cli.yes, cli.json)?;
+        }
+        if action_errors > 0 {
             std::process::exit(2);
         }
     }
