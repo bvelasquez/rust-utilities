@@ -16,7 +16,7 @@ defaults:
 projects:
   - id: simple-food-track
     name: Simple Food Track
-    path: "${projects_dir}/simple-health/simple-food-track"
+    path: "${projects_dir}/simple-food-track"
     package_manager: pnpm
     targets:
       hosting:
@@ -36,7 +36,7 @@ projects:
 
   - id: simple-workout
     name: Simple Workout
-    path: "${projects_dir}/simple-health/simple-workout"
+    path: "${projects_dir}/simple-workout"
     package_manager: pnpm
     targets:
       hosting:
@@ -48,7 +48,7 @@ projects:
 
   - id: simple-timer
     name: Simple Timer
-    path: "${projects_dir}/simple-health/simple-timer"
+    path: "${projects_dir}/simple-timer"
     package_manager: npm
     targets:
       hosting:
