@@ -1,0 +1,2 @@
+{"id":"bug","text":"```rust\nfn add(a: i32, b: i32) -> i32 { a - b }\n```\nFix the bug."}
+{"id":"fn","text":"Write a Python function that returns the median of a list of numbers."}

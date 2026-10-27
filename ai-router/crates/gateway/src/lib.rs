@@ -1,5 +1,6 @@
 //! OpenAI-compatible HTTP gateway.
 
+mod moa;
 mod observe;
 mod signals;
 
@@ -168,13 +169,18 @@ impl AppState {
     }
 
     fn record(&self, meta: &UsageMeta, finish: Finish) {
-        let cost = compute_cost(&meta.pricing, &finish.usage, meta.modality);
+        let cost = meta
+            .cost_override
+            .unwrap_or_else(|| compute_cost(&meta.pricing, &finish.usage, meta.modality));
         let known = finish.usage.known
             || finish.usage.images > 0
             || finish.usage.characters > 0
             || finish.usage.audio_seconds > 0.0;
         let rec = RequestRecord {
-            id: meta.request_id.clone(),
+            id: meta
+                .id_override
+                .clone()
+                .unwrap_or_else(|| meta.request_id.clone()),
             ts: now_unix(),
             client_label: meta.client_label.clone(),
             requested_model: meta.requested_model.clone(),
@@ -212,6 +218,10 @@ impl AppState {
                 .map(|r| r.rejected_json())
                 .unwrap_or_default(),
             feedback: None,
+            parent_id: meta.parent_id.clone(),
+            phase: meta.phase.clone(),
+            moa_degraded: meta.moa_degraded,
+            moa_proposers: meta.moa_proposers,
         };
         tracing::info!(
             request_id = %rec.id,
@@ -542,17 +552,17 @@ impl AppState {
             error: Some("unauthorized".into()),
             latency_ms: 0,
         };
-        let meta = UsageMeta {
-            request_id: new_id(),
-            client_label: "-".into(),
-            requested_model: "-".into(),
-            provider: "-".into(),
-            upstream_model: "-".into(),
-            modality: Modality::Chat,
-            endpoint: "auth".into(),
-            pricing: Default::default(),
-            route: None,
-        };
+        let meta = UsageMeta::basic(
+            new_id(),
+            "-",
+            "-",
+            "-",
+            "-",
+            Modality::Chat,
+            "auth",
+            Default::default(),
+            None,
+        );
         self.record(&meta, finish);
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -668,6 +678,7 @@ fn model_json(m: &airouter_core::ModelConfig) -> Value {
 async fn chat(
     State(state): State<AppState>,
     Extension(client): Extension<ClientId>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
@@ -710,7 +721,38 @@ async fn chat(
             Some("model_required"),
         );
     }
-    let target = match resolve_request(&state, &requested, Modality::Chat, &parsed, &client).await {
+    let (mode_override, moa_override) = if requested == "auto" || requested.starts_with("auto/") {
+        match moa::overrides(&headers) {
+            Ok(pair) => pair,
+            Err(message) => {
+                return fail(
+                    &state,
+                    &client,
+                    &requested,
+                    Modality::Chat,
+                    "/v1/chat/completions",
+                    request_id,
+                    started,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &message,
+                    None,
+                );
+            }
+        }
+    } else {
+        (None, airouter_core::MoaOverride::Auto)
+    };
+    let target = match resolve_request_mode(
+        &state,
+        &requested,
+        Modality::Chat,
+        &parsed,
+        &client,
+        mode_override,
+    )
+    .await
+    {
         Ok(t) => t,
         Err(err) => {
             return fail_core(
@@ -725,7 +767,16 @@ async fn chat(
             )
         }
     };
-    dispatch_chat(state, client, parsed, target, request_id, started).await
+    moa::route_chat(
+        state,
+        client,
+        moa_override,
+        parsed,
+        target,
+        request_id,
+        started,
+    )
+    .await
 }
 
 async fn dispatch_chat(
@@ -746,6 +797,7 @@ async fn dispatch_chat(
             capabilities: fb.capabilities.clone(),
             route: target.route.clone(),
             fallbacks: Vec::new(),
+            moa: None,
         }))
         .collect::<Vec<_>>();
     let mut last_err = None;
@@ -854,7 +906,14 @@ fn attach_route(body: &mut Value, target: &Target) {
         "confidence": route.confidence,
         "task": route.task,
         "rejected": route.rejected,
+        "mode": route.mode,
+        "required_quality": route.required_quality,
+        "selected_quality": route.selected_quality,
+        "estimated_cost_usd": route.estimated_cost_usd,
     });
+    if let Some(moa) = &target.moa {
+        body["airouter"]["moa"] = serde_json::to_value(moa).unwrap_or(json!({}));
+    }
 }
 
 async fn embeddings(
@@ -1181,17 +1240,17 @@ async fn transcriptions(
         }
     };
     let ctx = call_context(&state, &target);
-    let meta = UsageMeta {
-        request_id: request_id.clone(),
-        client_label: client.0.clone(),
-        requested_model: model,
-        provider: target.provider.clone(),
-        upstream_model: target.upstream_model.clone(),
-        modality: Modality::AudioStt,
-        endpoint: "/v1/audio/transcriptions".into(),
-        pricing: target.pricing.clone(),
-        route: target.route.clone(),
-    };
+    let meta = UsageMeta::basic(
+        request_id.clone(),
+        client.0.clone(),
+        model,
+        target.provider.clone(),
+        target.upstream_model.clone(),
+        Modality::AudioStt,
+        "/v1/audio/transcriptions",
+        target.pricing.clone(),
+        target.route.clone(),
+    );
     let upload = AudioUpload {
         file_name,
         mime,
@@ -1667,6 +1726,17 @@ async fn resolve_request(
     body: &Value,
     client: &ClientId,
 ) -> Result<Target, Error> {
+    resolve_request_mode(state, model, modality, body, client, None).await
+}
+
+async fn resolve_request_mode(
+    state: &AppState,
+    model: &str,
+    modality: Modality,
+    body: &Value,
+    client: &ClientId,
+    mode_override: Option<airouter_core::RoutingMode>,
+) -> Result<Target, Error> {
     if model.is_empty() {
         return Err(Error::Invalid("model is required".into()));
     }
@@ -1684,6 +1754,7 @@ async fn resolve_request(
             modality,
             summary,
             signals,
+            mode_override,
         },
     )
 }
@@ -1801,21 +1872,19 @@ fn usage_meta(
     target: &Target,
     endpoint: &str,
 ) -> UsageMeta {
-    UsageMeta {
-        request_id: request_id.to_string(),
-        client_label: client.0.clone(),
-        requested_model: body
-            .get("model")
+    UsageMeta::basic(
+        request_id,
+        client.0.clone(),
+        body.get("model")
             .and_then(|m| m.as_str())
-            .unwrap_or(&target.client_model)
-            .to_string(),
-        provider: target.provider.clone(),
-        upstream_model: target.upstream_model.clone(),
-        modality: target.modality,
-        endpoint: endpoint.to_string(),
-        pricing: target.pricing.clone(),
-        route: target.route.clone(),
-    }
+            .unwrap_or(&target.client_model),
+        target.provider.clone(),
+        target.upstream_model.clone(),
+        target.modality,
+        endpoint,
+        target.pricing.clone(),
+        target.route.clone(),
+    )
 }
 
 fn provider_fail(
@@ -1916,17 +1985,17 @@ fn fail(
     message: &str,
     code: Option<&str>,
 ) -> Response {
-    let meta = UsageMeta {
+    let meta = UsageMeta::basic(
         request_id,
-        client_label: client.0.clone(),
-        requested_model: model.to_string(),
-        provider: "-".into(),
-        upstream_model: "-".into(),
+        client.0.clone(),
+        model,
+        "-",
+        "-",
         modality,
-        endpoint: endpoint.to_string(),
-        pricing: Default::default(),
-        route: None,
-    };
+        endpoint,
+        Default::default(),
+        None,
+    );
     state.record(
         &meta,
         Finish {
@@ -2002,6 +2071,21 @@ fn insert_debug_headers(headers: &mut HeaderMap, request_id: &str, target: Optio
             );
             if let Ok(v) = HeaderValue::from_str(&value) {
                 headers.insert("x-airouter-route", v);
+            }
+            let moa_mode = target
+                .moa
+                .as_ref()
+                .map(|m| m.mode.as_str())
+                .filter(|m| !m.is_empty())
+                .or(if route.moa_mode.is_empty() {
+                    None
+                } else {
+                    Some(route.moa_mode.as_str())
+                });
+            if let Some(mode) = moa_mode {
+                if let Ok(v) = HeaderValue::from_str(mode) {
+                    headers.insert("x-airouter-moa", v);
+                }
             }
         }
     }

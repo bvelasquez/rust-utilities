@@ -174,6 +174,8 @@ pub struct ConfigFile {
     pub aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub routing: airouter_core::RoutingConfig,
+    #[serde(default)]
+    pub moa: airouter_core::MoaConfig,
 }
 
 impl Default for ConfigFile {
@@ -184,6 +186,7 @@ impl Default for ConfigFile {
             models: Vec::new(),
             aliases: BTreeMap::new(),
             routing: airouter_core::RoutingConfig::default(),
+            moa: airouter_core::MoaConfig::default(),
         }
     }
 }
@@ -662,6 +665,11 @@ pub fn validate_with(cfg: &ConfigFile, secrets: &BTreeMap<String, String>) -> Re
                 "alias '{alias}' is reserved for routing profiles; configure routing.profiles instead"
             ));
         }
+        if alias == "moa" || alias.starts_with("moa/") {
+            report.errors.push(format!(
+                "alias '{alias}' is reserved; mixture-of-agents is a routing strategy, not a model id"
+            ));
+        }
         let resolved_target = resolve_alias_target(&cfg.aliases, target);
         if !cfg.models.iter().any(|m| m.id == resolved_target) {
             report.warnings.push(format!(
@@ -671,6 +679,7 @@ pub fn validate_with(cfg: &ConfigFile, secrets: &BTreeMap<String, String>) -> Re
     }
 
     validate_routing(cfg, secrets, &mut report);
+    validate_moa(cfg, &mut report);
 
     if !cfg.models.iter().any(|m| m.enabled) {
         report
@@ -757,6 +766,211 @@ fn validate_routing(cfg: &ConfigFile, secrets: &BTreeMap<String, String>, report
                     .into(),
             );
         }
+    }
+}
+
+fn validate_moa(cfg: &ConfigFile, report: &mut Report) {
+    use airouter_core::RoutingMode;
+    for (name, profile) in &cfg.moa.profiles {
+        if name.is_empty() || name.contains('/') {
+            report.errors.push(format!(
+                "moa profile '{name}' must be a single path segment"
+            ));
+        }
+        if profile.proposers.is_empty() {
+            report
+                .errors
+                .push(format!("moa profile '{name}' needs at least one proposer"));
+        }
+        if profile.quorum < 1 || profile.quorum as usize > profile.proposers.len() {
+            report.errors.push(format!(
+                "moa profile '{name}' quorum must be between 1 and the proposer count"
+            ));
+        }
+        if profile.max_concurrency < 1 {
+            report.errors.push(format!(
+                "moa profile '{name}' max_concurrency must be at least 1"
+            ));
+        }
+        if profile.proposer_max_tokens == 0
+            || profile.aggregator_max_tokens == 0
+            || profile.overall_timeout_ms == 0
+        {
+            report.errors.push(format!(
+                "moa profile '{name}' token and timeout limits must be non-zero"
+            ));
+        }
+        let mut ids = Vec::new();
+        for proposer in &profile.proposers {
+            ids.push(proposer.model.clone());
+            ids.extend(proposer.fallbacks.iter().cloned());
+        }
+        ids.push(profile.aggregator.clone());
+        ids.extend(profile.aggregator_fallbacks.iter().cloned());
+        if let Some(worker) = &profile.worker_model {
+            ids.push(worker.clone());
+        }
+        for id in &ids {
+            check_moa_model(cfg, name, id, report);
+        }
+        if profile
+            .proposers
+            .iter()
+            .all(|p| p.model == profile.proposers[0].model)
+            && profile.proposers.len() > 1
+        {
+            report.warnings.push(format!(
+                "moa profile '{name}' uses the same model for every proposer"
+            ));
+        }
+        if profile.allow_tools {
+            for id in [profile.aggregator.as_str(), profile.worker()] {
+                if let Some(model) = cfg.models.iter().find(|m| m.id == id) {
+                    if !model.capabilities.is_empty()
+                        && !model.capabilities.iter().any(|c| c == "tools")
+                    {
+                        report.warnings.push(format!(
+                            "moa profile '{name}' allows tools but '{id}' does not list tools"
+                        ));
+                    }
+                }
+            }
+        }
+        if !profile.allow_providers.is_empty() {
+            for proposer in &profile.proposers {
+                if let Some(model) = cfg.models.iter().find(|m| m.id == proposer.model) {
+                    if !profile.allow_providers.iter().any(|p| p == &model.provider) {
+                        report.warnings.push(format!(
+                            "moa profile '{name}' allow_providers excludes proposer '{}'",
+                            proposer.model
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (name, profile) in &cfg.routing.profiles {
+        if let Some(moa_name) = &profile.moa_profile {
+            if !cfg.moa.profiles.contains_key(moa_name) {
+                report.errors.push(format!(
+                    "routing profile '{name}' references missing moa profile '{moa_name}'"
+                ));
+            }
+        }
+        if profile.strategy == airouter_core::RoutingStrategy::MoaOnDemand
+            && profile.moa_profile.is_none()
+        {
+            report.errors.push(format!(
+                "routing profile '{name}' uses moa_on_demand and needs moa_profile"
+            ));
+        }
+        if !cfg.moa.enabled && profile.strategy == airouter_core::RoutingStrategy::MoaOnDemand {
+            report.warnings.push(format!(
+                "routing profile '{name}' asks for on-demand MoA but moa.enabled is false"
+            ));
+        }
+        for (task, value) in &profile.required_quality {
+            if !(0.0..=1.0).contains(value) {
+                report.errors.push(format!(
+                    "routing profile '{name}' required_quality.{task} must be between 0 and 1"
+                ));
+            }
+        }
+        if profile.difficulty_step.is_some_and(|step| step < 0.0) {
+            report.errors.push(format!(
+                "routing profile '{name}' difficulty_step must be >= 0"
+            ));
+        }
+        if profile.relax_step < 0.0 {
+            report
+                .errors
+                .push(format!("routing profile '{name}' relax_step must be >= 0"));
+        }
+        if profile.max_cost_usd.is_some_and(|cost| cost <= 0.0) {
+            report.errors.push(format!(
+                "routing profile '{name}' max_cost_usd must be positive"
+            ));
+        }
+        if profile.max_latency_ms.is_some_and(|ms| ms == 0) {
+            report.errors.push(format!(
+                "routing profile '{name}' max_latency_ms must be positive"
+            ));
+        }
+        let tier_ids: Vec<&str> = profile
+            .tiers
+            .iter()
+            .flat_map(|tier| tier.models.iter().map(String::as_str))
+            .collect();
+        match profile.mode {
+            Some(RoutingMode::Balanced) | Some(RoutingMode::Quality) => {
+                let any_prior = tier_ids.iter().any(|id| {
+                    cfg.models
+                        .iter()
+                        .any(|m| m.id == *id && (m.quality.is_some() || !m.task_quality.is_empty()))
+                });
+                if !tier_ids.is_empty() && !any_prior {
+                    report.warnings.push(format!(
+                        "routing profile '{name}' has no task_quality priors; balanced and quality selection will not see a quality difference"
+                    ));
+                }
+                if let Some(safe) = cfg.models.iter().find(|m| m.id == profile.safe_model) {
+                    let safe_price = price_key(safe);
+                    let cheapest = tier_ids
+                        .iter()
+                        .filter_map(|id| cfg.models.iter().find(|m| m.id == *id).map(price_key))
+                        .fold(f64::MAX, f64::min);
+                    if safe_price <= cheapest && cheapest < f64::MAX {
+                        report.warnings.push(format!(
+                            "routing profile '{name}' safe_model is the cheapest model in the tier; it will not act as a quality backstop"
+                        ));
+                    }
+                }
+            }
+            Some(RoutingMode::Speed) => {
+                let any_latency = tier_ids.iter().any(|id| {
+                    cfg.models
+                        .iter()
+                        .any(|m| m.id == *id && m.latency_ms_prior.is_some())
+                });
+                if !tier_ids.is_empty() && !any_latency {
+                    report.warnings.push(format!(
+                        "routing profile '{name}' has no latency_ms_prior; speed mode will not differentiate latency"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn price_key(model: &airouter_core::ModelConfig) -> f64 {
+    model.pricing.input_per_mtok.unwrap_or(0.0) + model.pricing.output_per_mtok.unwrap_or(0.0)
+}
+
+fn check_moa_model(cfg: &ConfigFile, profile: &str, id: &str, report: &mut Report) {
+    if id.is_empty() {
+        report
+            .errors
+            .push(format!("moa profile '{profile}' has an empty model id"));
+        return;
+    }
+    if id == "auto" || id.starts_with("auto/") || id == "moa" || id.starts_with("moa/") {
+        report.errors.push(format!(
+            "moa profile '{profile}' model '{id}' cannot be auto or moa"
+        ));
+        return;
+    }
+    match cfg.models.iter().find(|m| m.id == id) {
+        None => report.errors.push(format!(
+            "moa profile '{profile}' model '{id}' is not a configured model"
+        )),
+        Some(model) if !model.enabled => report
+            .errors
+            .push(format!("moa profile '{profile}' model '{id}' is disabled")),
+        Some(model) if model.modality != Modality::Chat => report
+            .errors
+            .push(format!("moa profile '{profile}' model '{id}' must be chat")),
+        Some(_) => {}
     }
 }
 
@@ -917,6 +1131,7 @@ pub fn template_config(token_file: &Path) -> ConfigFile {
         models: Vec::new(),
         aliases: BTreeMap::new(),
         routing: airouter_core::RoutingConfig::default(),
+        moa: airouter_core::MoaConfig::default(),
     }
 }
 

@@ -79,10 +79,15 @@ enum Command {
         #[arg(long, default_value = "model")]
         by: String,
     },
-    /// Re-score logged auto routes against the current profiles.
+    /// Re-score logged auto routes, or suggest latency priors.
     Route {
         #[command(subcommand)]
         cmd: RouteCmd,
+    },
+    /// Inspect on-demand mixture-of-agents decisions against a fixture.
+    Moa {
+        #[command(subcommand)]
+        cmd: MoaCmd,
     },
     Config {
         #[command(subcommand)]
@@ -103,6 +108,22 @@ enum RouteCmd {
     Replay {
         #[arg(long, default_value = "30d")]
         since: String,
+    },
+    /// Suggest latency priors from the usage log. `--apply` writes them onto matching models.
+    Calibrate {
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MoaCmd {
+    /// Score single, always-MoA, and on-demand decisions for a JSONL fixture.
+    Eval {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        profile: String,
     },
 }
 
@@ -281,6 +302,10 @@ fn dispatch(cli: Cli, path: &Path) -> Result<Printed, String> {
         Command::Usage { since, by } => usage_cmd(path, &since, &by),
         Command::Route { cmd } => match cmd {
             RouteCmd::Replay { since } => route_replay(path, &since),
+            RouteCmd::Calibrate { apply } => route_calibrate(path, apply),
+        },
+        Command::Moa { cmd } => match cmd {
+            MoaCmd::Eval { file, profile } => moa_eval(path, &file, &profile),
         },
     }
 }
@@ -1172,6 +1197,142 @@ fn route_replay(path: &Path, since: &str) -> Result<Printed, String> {
             "feedback_up": report.feedback_up,
             "feedback_down": report.feedback_down,
         }),
+        code: 0,
+    })
+}
+
+fn route_calibrate(path: &Path, apply: bool) -> Result<Printed, String> {
+    let mut file = load_file(path).map_err(|e| e.to_string())?;
+    let db = airouter_config::default_state_dir(&file.server).join("usage.db");
+    if !db.exists() {
+        return Ok(Printed {
+            text: "no usage recorded yet; latency priors were not changed\n".into(),
+            json: json!({"samples": 0, "applied": false}),
+            code: 0,
+        });
+    }
+    let store = Store::open(&db).map_err(|e| e.to_string())?;
+    let samples = store.latency_samples().map_err(|e| e.to_string())?;
+    let mut by_model: BTreeMap<String, Vec<(u64, Option<u64>)>> = BTreeMap::new();
+    for (model, latency, ttft) in samples {
+        by_model.entry(model).or_default().push((latency, ttft));
+    }
+    let mut suggestions = Vec::new();
+    for (model, rows) in &by_model {
+        let mut latency: Vec<u64> = rows.iter().map(|(ms, _)| *ms).collect();
+        let mut ttft: Vec<u64> = rows.iter().filter_map(|(_, ttft)| *ttft).collect();
+        let p50_latency = percentile(&mut latency, 0.5);
+        let p50_ttft = if ttft.is_empty() {
+            None
+        } else {
+            Some(percentile(&mut ttft, 0.5))
+        };
+        suggestions.push(json!({
+            "model": model,
+            "n": rows.len(),
+            "latency_ms_p50": p50_latency,
+            "ttft_ms_p50": p50_ttft,
+        }));
+        if apply {
+            for configured in &mut file.models {
+                if configured.id == *model || configured.upstream == *model {
+                    configured.latency_ms_prior = Some(p50_latency);
+                }
+            }
+        }
+    }
+    if apply {
+        save_file(path, &file).map_err(|e| e.to_string())?;
+    }
+    let mut text = format!(
+        "latency samples {} across {} models\n",
+        by_model.values().map(Vec::len).sum::<usize>(),
+        by_model.len()
+    );
+    if suggestions.is_empty() {
+        text.push_str("no successful requests with latency yet\n");
+    }
+    for row in &suggestions {
+        text.push_str(&format!(
+            "{}  n={}  p50 {}ms  ttft {}\n",
+            row["model"].as_str().unwrap_or(""),
+            row["n"],
+            row["latency_ms_p50"],
+            row["ttft_ms_p50"]
+        ));
+    }
+    if apply {
+        text.push_str("wrote latency_ms_prior onto matching models\n");
+    } else {
+        text.push_str("pass --apply to write latency_ms_prior\n");
+    }
+    text.push_str("task_quality still comes from fixtures/tasks and a judge; this command does not invent it\n");
+    Ok(Printed {
+        text,
+        json: json!({"applied": apply, "models": suggestions}),
+        code: 0,
+    })
+}
+
+fn percentile(values: &mut [u64], p: f64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let idx = ((values.len() - 1) as f64 * p).round() as usize;
+    values[idx.min(values.len() - 1)]
+}
+
+fn moa_eval(path: &Path, file: &Path, profile: &str) -> Result<Printed, String> {
+    let cfg = load_file(path).map_err(|e| e.to_string())?;
+    let raw = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let mut cases = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let case: airouter_registry::EvalCase = serde_json::from_str(line)
+            .map_err(|e| format!("{}:{}: {e}", file.display(), index + 1))?;
+        cases.push(case);
+    }
+    let registry = airouter_registry::Registry::from_parts(
+        cfg.models.clone(),
+        cfg.aliases.clone(),
+        cfg.routing.clone(),
+    );
+    let report = airouter_registry::evaluate(&registry, &cfg.moa, profile, &cases)?;
+    let mut text = format!(
+        "profile {}  cases {}  on-demand moa {}\n",
+        report.profile,
+        report.cases.len(),
+        report.on_demand_moa
+    );
+    if let (Some(single), Some(moa)) = (report.avg_single_quality, report.avg_moa_quality) {
+        text.push_str(&format!(
+            "fixture quality  single {single:.3}  moa {moa:.3}\n"
+        ));
+    }
+    text.push_str(&format!(
+        "avg cost  single ${:.4}  on-demand ${:.4}  always-moa ${:.4}\n",
+        report.avg_single_cost_usd, report.avg_on_demand_cost_usd, report.avg_always_cost_usd
+    ));
+    for row in &report.cases {
+        text.push_str(&format!(
+            "{}  {} d{}  {}  ${:.4}  {} ({})\n",
+            row.id,
+            row.task,
+            row.difficulty,
+            row.single_model,
+            row.single_cost_usd,
+            row.on_demand,
+            row.on_demand_reason
+        ));
+    }
+    let json = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+    Ok(Printed {
+        text,
+        json,
         code: 0,
     })
 }

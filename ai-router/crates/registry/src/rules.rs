@@ -5,7 +5,8 @@
 //! `quality - lambda * estimated_cost - mu * latency_seconds`.
 
 use airouter_core::{
-    auto_profile, Error, Fallback, Modality, ModelConfig, RouteInfo, RouteRequest, RoutingProfile,
+    auto_profile, estimate_output_tokens, estimate_text_cost, model_task_quality, required_quality,
+    Error, Fallback, Modality, ModelConfig, RouteInfo, RouteRequest, RoutingMode, RoutingProfile,
     Signals, Target,
 };
 
@@ -87,6 +88,7 @@ pub fn resolve_auto(registry: &Registry, req: &RouteRequest) -> Result<Target, E
         .signals
         .clone()
         .unwrap_or_else(|| local_signals(&req.summary));
+    let mode = req.mode_override.or(profile.mode);
     pick(
         registry,
         req.modality,
@@ -94,6 +96,7 @@ pub fn resolve_auto(registry: &Registry, req: &RouteRequest) -> Result<Target, E
         profile,
         &signals,
         &req.summary,
+        mode,
     )
 }
 
@@ -104,7 +107,19 @@ fn pick(
     profile: &RoutingProfile,
     signals: &Signals,
     summary: &airouter_core::RequestSummary,
+    mode: Option<RoutingMode>,
 ) -> Result<Target, Error> {
+    if let Some(mode) = mode {
+        return crate::selection::select(
+            registry,
+            modality,
+            profile_name,
+            profile,
+            signals,
+            summary,
+            mode,
+        );
+    }
     let token_estimate = summary.token_estimate;
     let mut rejected = Vec::new();
     let mut eligible: Vec<&ModelConfig> = Vec::new();
@@ -135,6 +150,13 @@ fn pick(
         }
     }
     let chosen = eligible[0];
+    let (selected_quality, explicit) = model_task_quality(chosen, &signals.task);
+    let required = required_quality(&signals.task, signals.difficulty, profile);
+    let estimated = estimate_text_cost(
+        &chosen.pricing,
+        token_estimate,
+        estimate_output_tokens(&signals.task, token_estimate),
+    );
     let reason = if gated {
         format!(
             "confidence {:.2} below floor {:.2}; safe model",
@@ -164,7 +186,7 @@ fn pick(
         capabilities: chosen.capabilities.clone(),
         route: Some(RouteInfo {
             profile: profile_name.to_string(),
-            reason,
+            reason: reason.clone(),
             confidence: signals.confidence,
             source: signals.source.clone(),
             task: signals.task.clone(),
@@ -173,12 +195,20 @@ fn pick(
             needs_reasoning: signals.needs_reasoning,
             contains_code: signals.contains_code,
             rejected,
+            mode: String::new(),
+            required_quality: required,
+            selected_quality,
+            estimated_cost_usd: estimated,
+            selection_reason: reason.clone(),
+            moa_mode: String::new(),
+            explicit_quality_prior: explicit,
         }),
         fallbacks,
+        moa: None,
     })
 }
 
-fn candidate_ids(profile: &RoutingProfile, signals: &Signals) -> Vec<String> {
+pub(crate) fn candidate_ids(profile: &RoutingProfile, signals: &Signals) -> Vec<String> {
     let mut ids = Vec::new();
     for tier in &profile.tiers {
         let task_ok = tier.task == "*" || tier.task == signals.task;
@@ -197,7 +227,7 @@ fn candidate_ids(profile: &RoutingProfile, signals: &Signals) -> Vec<String> {
     ids
 }
 
-fn admit<'a>(
+pub(crate) fn admit<'a>(
     registry: &'a Registry,
     id: &str,
     modality: Modality,
@@ -291,6 +321,7 @@ pub fn replay(registry: &Registry, rows: &[ReplayRow]) -> ReplayReport {
                 ..airouter_core::RequestSummary::default()
             },
             signals: Some(signals),
+            mode_override: None,
         };
         let Ok(target) = resolve_auto(registry, &req) else {
             continue;

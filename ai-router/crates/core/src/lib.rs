@@ -5,6 +5,7 @@
 //! the rules router when a routing profile is configured.
 
 mod error;
+mod moa;
 mod modality;
 mod model;
 mod pricing;
@@ -12,12 +13,18 @@ mod routing;
 mod usage;
 
 pub use error::Error;
+pub use moa::{
+    conversation_has_assistant, decide, estimate_moa_cost, MoaCallReport, MoaConfig,
+    MoaDecisionInput, MoaMode, MoaOverride, MoaProfile, MoaReport, ProposerSpec, SelectedModel,
+};
 pub use modality::Modality;
 pub use model::ModelConfig;
 pub use pricing::Pricing;
 pub use routing::{
-    auto_profile, EmbeddingSettings, Fallback, JevSettings, RequestSummary, RouteInfo,
-    RoutingConfig, RoutingProfile, RoutingTier, SignalKind, SignalSettings, Signals,
+    auto_profile, builtin_quality_base, estimate_output_tokens, estimate_text_cost,
+    latency_prior_ms, model_task_quality, required_quality, EmbeddingSettings, Fallback,
+    JevSettings, MoaTriggers, RequestSummary, RouteInfo, RoutingConfig, RoutingMode,
+    RoutingProfile, RoutingStrategy, RoutingTier, SignalKind, SignalSettings, Signals,
 };
 pub use usage::{compute_cost, SseUsageParser, TokenUsage, UsageMeta};
 
@@ -29,6 +36,8 @@ pub struct RouteRequest {
     pub summary: RequestSummary,
     /// Filled by the gateway before resolve. `None` means the router derives local signals.
     pub signals: Option<Signals>,
+    /// `x-airouter-mode`, when the client sent one. Applies only to `auto` profiles.
+    pub mode_override: Option<RoutingMode>,
 }
 
 impl RouteRequest {
@@ -38,6 +47,7 @@ impl RouteRequest {
             modality,
             summary: RequestSummary::default(),
             signals: None,
+            mode_override: None,
         }
     }
 }
@@ -53,6 +63,8 @@ pub struct Target {
     pub capabilities: Vec<String>,
     pub route: Option<RouteInfo>,
     pub fallbacks: Vec<Fallback>,
+    /// Set when this response was produced by mixture-of-agents.
+    pub moa: Option<MoaReport>,
 }
 
 /// Finished (or abandoned) request, stored and shown in the live log.
@@ -88,6 +100,16 @@ pub struct RequestRecord {
     /// `1` thumbs up, `-1` thumbs down, absent when the client has not rated the call.
     #[serde(default)]
     pub feedback: Option<i8>,
+    /// Set on proposer and aggregator rows. Empty on the client-facing row.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// `moa`, `proposer`, `aggregator`, `worker`, or empty for a normal call.
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub moa_degraded: bool,
+    #[serde(default)]
+    pub moa_proposers: u32,
 }
 
 /// Dashboard payload shared by the admin API and the TUI.

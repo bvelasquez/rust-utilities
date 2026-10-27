@@ -108,6 +108,19 @@ impl Provider for OpenAiProvider {
             return Err(error_from_response(resp).await);
         }
         if stream {
+            let content_type = resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            // Some aggregators ignore `stream` and return one JSON object.
+            if content_type.contains("application/json") {
+                let value = resp
+                    .json()
+                    .await
+                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                return Ok(ChatResult::Complete(value));
+            }
             let stream = resp
                 .bytes_stream()
                 .map(|r| r.map_err(|e| ProviderError::Transport(e.to_string())));

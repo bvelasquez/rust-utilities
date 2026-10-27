@@ -96,6 +96,46 @@ pub struct UsageMeta {
     pub endpoint: String,
     pub pricing: Pricing,
     pub route: Option<RouteInfo>,
+    pub parent_id: Option<String>,
+    pub phase: String,
+    /// When set, stored instead of [`compute_cost`].
+    pub cost_override: Option<f64>,
+    /// Stored id. Unset uses [`Self::request_id`].
+    pub id_override: Option<String>,
+    pub moa_degraded: bool,
+    pub moa_proposers: u32,
+}
+
+impl UsageMeta {
+    pub fn basic(
+        request_id: impl Into<String>,
+        client_label: impl Into<String>,
+        requested_model: impl Into<String>,
+        provider: impl Into<String>,
+        upstream_model: impl Into<String>,
+        modality: Modality,
+        endpoint: impl Into<String>,
+        pricing: Pricing,
+        route: Option<RouteInfo>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            client_label: client_label.into(),
+            requested_model: requested_model.into(),
+            provider: provider.into(),
+            upstream_model: upstream_model.into(),
+            modality,
+            endpoint: endpoint.into(),
+            pricing,
+            route,
+            parent_id: None,
+            phase: String::new(),
+            cost_override: None,
+            id_override: None,
+            moa_degraded: false,
+            moa_proposers: 0,
+        }
+    }
 }
 
 pub fn compute_cost(pricing: &Pricing, usage: &TokenUsage, modality: Modality) -> f64 {

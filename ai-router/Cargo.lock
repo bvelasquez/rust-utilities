@@ -107,6 +107,7 @@ name = "airouter-registry"
 version = "0.1.0"
 dependencies = [
  "airouter-core",
+ "serde",
  "serde_json",
 ]
 

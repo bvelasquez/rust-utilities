@@ -96,8 +96,9 @@ impl Store {
                 id, ts, client_label, requested_model, provider, upstream_model, modality,
                 status, error, latency_ms, ttft_ms, input_tokens, output_tokens, cached_tokens,
                 cost_usd, endpoint, route_profile, route_reason, route_confidence,
-                route_signals, route_rejected, feedback
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                route_signals, route_rejected, feedback, parent_id, phase,
+                moa_degraded, moa_proposers
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
             params![
                 rec.id,
                 rec.ts,
@@ -121,6 +122,10 @@ impl Store {
                 rec.route_signals,
                 rec.route_rejected,
                 rec.feedback,
+                rec.parent_id,
+                rec.phase,
+                rec.moa_degraded,
+                rec.moa_proposers,
             ],
         )?;
         Ok(())
@@ -132,8 +137,11 @@ impl Store {
             "SELECT id, ts, client_label, requested_model, provider, upstream_model, modality,
                     status, error, latency_ms, ttft_ms, input_tokens, output_tokens, cached_tokens,
                     cost_usd, endpoint, route_profile, route_reason, route_confidence,
-                    route_signals, route_rejected, feedback
-             FROM requests ORDER BY ts DESC, rowid DESC LIMIT ?1",
+                    route_signals, route_rejected, feedback, parent_id, phase,
+                    moa_degraded, moa_proposers
+             FROM requests
+             WHERE parent_id IS NULL
+             ORDER BY ts DESC, rowid DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], row_to_record)?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -148,7 +156,7 @@ impl Store {
                     COALESCE(SUM(input_tokens), 0),
                     COALESCE(SUM(output_tokens), 0),
                     COALESCE(SUM(cost_usd), 0)
-             FROM requests WHERE ts >= ?1",
+             FROM requests WHERE ts >= ?1 AND parent_id IS NULL",
         )?;
         let summary = stmt.query_row(params![since], |row| {
             Ok(Summary {
@@ -176,6 +184,11 @@ impl Store {
                 "CASE WHEN route_profile IS NULL OR route_profile = '' THEN '(explicit)' ELSE route_profile END"
             }
         };
+        let filter = match by {
+            // Attribute fan-out spend to the concrete models and skip the moa parent row.
+            GroupBy::Model => "COALESCE(phase, '') != 'moa'",
+            _ => "parent_id IS NULL",
+        };
         let sql = format!(
             "SELECT {key_expr} AS k,
                     COUNT(*),
@@ -183,7 +196,7 @@ impl Store {
                     COALESCE(SUM(input_tokens), 0),
                     COALESCE(SUM(output_tokens), 0),
                     COALESCE(SUM(cost_usd), 0)
-             FROM requests WHERE ts >= ?1
+             FROM requests WHERE ts >= ?1 AND {filter}
              GROUP BY k
              ORDER BY 6 DESC"
         );
@@ -228,6 +241,10 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
         route_signals: row.get::<_, Option<String>>(19)?.unwrap_or_default(),
         route_rejected: row.get::<_, Option<String>>(20)?.unwrap_or_default(),
         feedback: row.get::<_, Option<i64>>(21)?.map(|v| v as i8),
+        parent_id: row.get(22)?,
+        phase: row.get::<_, Option<String>>(23)?.unwrap_or_default(),
+        moa_degraded: row.get::<_, Option<i64>>(24)?.unwrap_or(0) != 0,
+        moa_proposers: row.get::<_, Option<i64>>(25)?.unwrap_or(0) as u32,
     })
 }
 
@@ -247,6 +264,10 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         ("route_signals", "TEXT"),
         ("route_rejected", "TEXT"),
         ("feedback", "INTEGER"),
+        ("parent_id", "TEXT"),
+        ("phase", "TEXT"),
+        ("moa_degraded", "INTEGER"),
+        ("moa_proposers", "INTEGER"),
     ] {
         if !existing.contains(column) {
             conn.execute(
@@ -268,14 +289,39 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Successful parent rows, used to suggest `latency_ms_prior`.
+    pub fn latency_samples(&self) -> Result<Vec<(String, u64, Option<u64>)>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT requested_model, upstream_model, latency_ms, ttft_ms
+             FROM requests
+             WHERE parent_id IS NULL AND status < 400 AND latency_ms > 0",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let requested: String = row.get(0)?;
+            let upstream: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+            let key = if requested.starts_with("auto") && !upstream.is_empty() {
+                upstream
+            } else {
+                requested
+            };
+            let latency: i64 = row.get(2)?;
+            let ttft: Option<i64> = row.get(3)?;
+            Ok((key, latency as u64, ttft.map(|v| v as u64)))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn scan_since(&self, since: i64) -> Result<Vec<RequestRecord>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, ts, client_label, requested_model, provider, upstream_model, modality,
                     status, error, latency_ms, ttft_ms, input_tokens, output_tokens, cached_tokens,
                     cost_usd, endpoint, route_profile, route_reason, route_confidence,
-                    route_signals, route_rejected, feedback
-             FROM requests WHERE ts >= ?1 ORDER BY ts ASC",
+                    route_signals, route_rejected, feedback, parent_id, phase,
+                    moa_degraded, moa_proposers
+             FROM requests WHERE ts >= ?1 AND parent_id IS NULL ORDER BY ts ASC",
         )?;
         let rows = stmt.query_map(params![since], row_to_record)?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -334,6 +380,10 @@ mod tests {
             route_signals: "{}".into(),
             route_rejected: "[]".into(),
             feedback: None,
+            parent_id: None,
+            phase: String::new(),
+            moa_degraded: false,
+            moa_proposers: 0,
         };
         store.insert(&rec).unwrap();
         let mut failed = rec.clone();
@@ -362,5 +412,37 @@ mod tests {
         let rated = store.recent(10).unwrap();
         let r1 = rated.iter().find(|r| r.id == "r1").unwrap();
         assert_eq!(r1.feedback, Some(1));
+
+        let mut child = rec.clone();
+        child.id = "child".into();
+        child.parent_id = Some("r1".into());
+        child.phase = "proposer".into();
+        child.requested_model = "openai/gpt-4o-mini".into();
+        child.cost_usd = 0.002;
+        store.insert(&child).unwrap();
+        let mut parent = rec.clone();
+        parent.id = "moa-parent".into();
+        parent.phase = "moa".into();
+        parent.provider = "moa".into();
+        parent.cost_usd = 0.002;
+        parent.moa_proposers = 1;
+        store.insert(&parent).unwrap();
+
+        let summary = store.summary_since(0).unwrap();
+        assert_eq!(summary.requests, 3);
+        assert!((summary.cost_usd - 0.004).abs() < 1e-9);
+
+        let by_model = store.aggregate(0, GroupBy::Model).unwrap();
+        let mini = by_model
+            .iter()
+            .find(|row| row.key == "openai/gpt-4o-mini")
+            .unwrap();
+        assert_eq!(mini.requests, 3);
+        assert!(by_model.iter().all(|row| row.key != "moa"));
+        assert!(store
+            .recent(10)
+            .unwrap()
+            .iter()
+            .all(|row| row.parent_id.is_none()));
     }
 }

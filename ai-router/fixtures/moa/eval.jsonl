@@ -1,0 +1,3 @@
+{"id":"hi","text":"hi","single_quality":0.9,"moa_quality":0.9}
+{"id":"prove","text":"Prove that the sum of two even integers is even. Show the steps.","single_quality":0.45,"moa_quality":0.8}
+{"id":"follow","text":"now make it shorter","followup":true,"single_quality":0.8,"moa_quality":0.8}

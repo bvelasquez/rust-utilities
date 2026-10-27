@@ -5,7 +5,9 @@
 
 mod cheaperinference;
 mod deepinfra;
+mod eval;
 mod rules;
+mod selection;
 
 pub use cheaperinference::{
     list_url as cheaperinference_list_url, models_from_list as cheaperinference_models_from_list,
@@ -18,6 +20,7 @@ use std::collections::BTreeMap;
 
 use airouter_core::{Error, ModelConfig, RouteRequest, RoutingConfig, Target};
 
+pub use eval::{evaluate, EvalCase, EvalReport, EvalRow};
 pub use rules::{local_signals, replay, ReplayReport, ReplayRow};
 
 const CATALOG_JSON: &str = include_str!("catalog.json");
@@ -130,6 +133,7 @@ pub fn resolve(registry: &Registry, req: &RouteRequest) -> Result<Target, Error>
         capabilities: model.capabilities.clone(),
         route: None,
         fallbacks: Vec::new(),
+        moa: None,
     })
 }
 
@@ -262,6 +266,7 @@ mod tests {
                 mu: 0.02,
                 allow_providers: vec![],
                 hosted_signal_clients: vec![],
+                ..RoutingProfile::default()
             },
         );
         let mut routing = airouter_core::RoutingConfig::default();
@@ -327,6 +332,7 @@ mod tests {
                 mu: 0.0,
                 allow_providers: vec![],
                 hosted_signal_clients: vec![],
+                ..RoutingProfile::default()
             },
         );
         let mut routing = airouter_core::RoutingConfig::default();
@@ -408,6 +414,7 @@ mod tests {
                 mu: 0.02,
                 allow_providers: vec![],
                 hosted_signal_clients: vec![],
+                ..airouter_core::RoutingProfile::default()
             },
         );
         let reg = Registry::from_parts(vec![mini, claude], BTreeMap::new(), routing);

@@ -401,6 +401,10 @@ fn merged_logs(
 }
 
 fn filter_logs(logs: Vec<RequestRecord>, filter: &str) -> Vec<RequestRecord> {
+    let logs: Vec<RequestRecord> = logs
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref().unwrap_or("").is_empty())
+        .collect();
     if filter.is_empty() {
         return logs;
     }
@@ -712,6 +716,20 @@ fn draw_dashboard(
     frame.render_widget(table, area);
 }
 
+fn log_model(rec: &RequestRecord) -> String {
+    if rec.provider == "moa" {
+        let degraded = if rec.moa_degraded { " degraded" } else { "" };
+        format!(
+            "{} [{}, {} proposers]{degraded}",
+            rec.requested_model, rec.route_profile, rec.moa_proposers
+        )
+    } else if rec.route_profile.is_empty() {
+        rec.requested_model.clone()
+    } else {
+        format!("{} ({})", rec.requested_model, rec.route_profile)
+    }
+}
+
 fn draw_logs(frame: &mut Frame, area: ratatui::layout::Rect, logs: &[RequestRecord], ui: &Model) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -737,7 +755,7 @@ fn draw_logs(frame: &mut Frame, area: ratatui::layout::Rect, logs: &[RequestReco
                 Cell::from(rec.ts.to_string()),
                 Cell::from(rec.status.to_string()),
                 Cell::from(rec.provider.clone()),
-                Cell::from(rec.requested_model.clone()),
+                Cell::from(log_model(rec)),
                 Cell::from(format_tokens(rec)),
                 Cell::from(format!("${:.4}", rec.cost_usd)),
                 Cell::from(format!("{}ms", rec.latency_ms)),
