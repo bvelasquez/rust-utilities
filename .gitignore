@@ -1,5 +1,6 @@
 # Rust / Cargo
-**/target/
+# no trailing slash: each crate's target is a symlink into /srv/vms/cargo-targets
+**/target
 
 # Backup artifacts (secret-sweep)
 *.svault
