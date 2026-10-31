@@ -1,13 +1,13 @@
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use uuid::Uuid;
 
 use crate::broker::BrokerClient;
-use crate::config::{ResolvedConfig, ResolvedProject, ResolvedTarget, SpeakEvent, SpeakDefaults};
+use crate::config::{ResolvedConfig, ResolvedProject, ResolvedTarget, SpeakDefaults, SpeakEvent};
 use crate::runner::{append_log, build_spawn_spec, log_path_for, pump_lines, spawn_deploy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -48,8 +48,8 @@ impl JobRecord {
 pub struct JobOrchestrator {
     inner: Arc<Mutex<OrchestratorInner>>,
     semaphore: Arc<Semaphore>,
-    speak: SpeakDefaults,
-    broker: BrokerClient,
+    speak: Arc<RwLock<SpeakDefaults>>,
+    broker: Arc<RwLock<BrokerClient>>,
     max_history: usize,
 }
 
@@ -87,6 +87,9 @@ struct OrchestratorInner {
     project_active: HashMap<String, Uuid>,
     /// Writers for running child stdin (prompts like y/N).
     stdin: HashMap<Uuid, mpsc::Sender<Vec<u8>>>,
+    /// Jobs whose terminal state is set but whose TTS request is still playing.
+    /// `--wait` callers hold the process open until this clears.
+    speech_pending: HashSet<Uuid>,
 }
 
 impl OrchestratorInner {
@@ -128,16 +131,43 @@ impl JobOrchestrator {
                 order: Vec::new(),
                 project_active: HashMap::new(),
                 stdin: HashMap::new(),
+                speech_pending: HashSet::new(),
             })),
             semaphore: Arc::new(Semaphore::new(permits)),
-            speak,
-            broker,
+            speak: Arc::new(RwLock::new(speak)),
+            broker: Arc::new(RwLock::new(broker)),
             max_history: 50,
         }
     }
 
-    pub fn broker(&self) -> &BrokerClient {
-        &self.broker
+    /// Apply TTS changes after the config file is reloaded. Existing jobs keep
+    /// their already-captured speak settings; queued jobs use the new values.
+    pub fn update_speak(&self, cfg: &ResolvedConfig) {
+        let speak = cfg.defaults.speak.clone();
+        let broker = BrokerClient::new(speak.base_url.clone(), speak.voice.clone());
+        *self.speak.write().expect("tts settings lock poisoned") = speak;
+        *self.broker.write().expect("tts broker lock poisoned") = broker;
+    }
+
+    pub fn broker(&self) -> BrokerClient {
+        self.broker
+            .read()
+            .expect("tts broker lock poisoned")
+            .clone()
+    }
+
+    /// Whether terminal-state speech is enabled by defaults. Individual targets
+    /// can still opt in/out with `speak:` in projects.yaml.
+    pub fn tts_enabled(&self) -> bool {
+        self.speak
+            .read()
+            .expect("tts settings lock poisoned")
+            .enabled
+    }
+
+    /// Whether a terminal job is still waiting for its TTS request to finish.
+    pub async fn speech_pending(&self, id: Uuid) -> bool {
+        self.inner.lock().await.speech_pending.contains(&id)
     }
 
     pub async fn list_jobs(&self) -> Vec<JobRecord> {
@@ -182,16 +212,21 @@ impl JobOrchestrator {
             log_path: log_path.to_string_lossy().into(),
             log_tail: VecDeque::new(),
         };
-        record.push_log(format!(
-            "queued: {} / {}",
-            project.id, target.id
-        ));
+        record.push_log(format!("queued: {} / {}", project.id, target.id));
 
         let spec = build_spawn_spec(project, target)?;
         let inner = self.inner.clone();
         let semaphore = self.semaphore.clone();
-        let speak = self.speak.clone();
-        let broker = self.broker.clone();
+        let speak = self
+            .speak
+            .read()
+            .expect("tts settings lock poisoned")
+            .clone();
+        let broker = self
+            .broker
+            .read()
+            .expect("tts broker lock poisoned")
+            .clone();
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let target_label = target.label.clone();
@@ -246,6 +281,7 @@ impl JobOrchestrator {
                     j.push_log(format!("orchestrator error: {e}"));
                 }
                 g.stdin.remove(&id);
+                g.speech_pending.remove(&id);
                 g.clear_project_slot(&project_id, id);
             }
         });
@@ -272,6 +308,7 @@ impl JobOrchestrator {
                 let _ = std::fs::remove_file(&job.log_path);
             }
             g.jobs.remove(id);
+            g.speech_pending.remove(id);
         }
         g.order.retain(|id| !to_remove.contains(id));
         Ok(n)
@@ -280,7 +317,10 @@ impl JobOrchestrator {
     pub async fn cancel(&self, id: Uuid) -> Result<()> {
         // v1: mark cancelled; child kill wired via JobHandle map in future
         let mut g = self.inner.lock().await;
-        let job = g.jobs.get_mut(&id).ok_or_else(|| anyhow!("job not found"))?;
+        let job = g
+            .jobs
+            .get_mut(&id)
+            .ok_or_else(|| anyhow!("job not found"))?;
         if job.phase != JobPhase::Running && job.phase != JobPhase::Queued {
             bail!("job is not running");
         }
@@ -288,6 +328,7 @@ impl JobOrchestrator {
         job.phase = JobPhase::Cancelled;
         job.finished_at = Some(Utc::now());
         g.stdin.remove(&id);
+        g.speech_pending.remove(&id);
         g.clear_project_slot(&project_id, id);
         Ok(())
     }
@@ -415,8 +456,18 @@ async fn run_job(
         && ((success && speak_defaults.on.contains(&SpeakEvent::Success))
             || (!success && speak_defaults.on.contains(&SpeakEvent::Error)));
 
+    let last_output_line = if should_speak && !success {
+        let g = inner.lock().await;
+        g.jobs.get(&id).and_then(last_error_line)
+    } else {
+        None
+    };
+
     {
         let mut g = inner.lock().await;
+        if should_speak {
+            g.speech_pending.insert(id);
+        }
         if let Some(job) = g.jobs.get_mut(&id) {
             job.phase = phase;
             job.finished_at = Some(Utc::now());
@@ -430,11 +481,15 @@ async fn run_job(
     if should_speak {
         let msg = if success {
             format!("{project_name} {target_label} deploy succeeded.")
+        } else if let Some(line) = last_output_line {
+            format!("{project_name} {target_label} deploy failed with exit code {code}: {line}")
         } else {
             format!("{project_name} {target_label} deploy failed with exit code {code}.")
         };
-        if let Err(e) = broker.speak(&msg).await {
-            let mut g = inner.lock().await;
+        let speak_err = broker.speak(&msg).await.err();
+        let mut g = inner.lock().await;
+        g.speech_pending.remove(&id);
+        if let Some(e) = speak_err {
             if let Some(j) = g.jobs.get_mut(&id) {
                 j.push_log(format!("speak warning: {e}"));
             }
@@ -443,4 +498,35 @@ async fn run_job(
 
     let _ = log_path_stderr;
     Ok(())
+}
+
+/// Pick the last meaningful process-output line for the failure announcement.
+/// Skips soki-ci's own bookkeeping lines and truncates noisy build output.
+fn last_error_line(job: &JobRecord) -> Option<String> {
+    let line = job
+        .log_tail
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .map(|l| l.strip_prefix("[stderr] ").unwrap_or(l))
+        .find(|l| {
+            !l.is_empty()
+                && !l.starts_with("queued:")
+                && !l.starts_with("running:")
+                && !l.starts_with("finished:")
+                && !l.starts_with("[stdin]")
+        })?;
+    Some(truncate_for_speech(line, 200))
+}
+
+fn truncate_for_speech(text: &str, max_chars: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut out: String = clean.chars().take(max_chars).collect();
+    if clean.chars().count() > max_chars {
+        out.push('…');
+    }
+    out.trim().to_string()
 }

@@ -148,7 +148,11 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
     let mut mode = Mode::Browse;
     let mut status_line = format!("ready — {api_label} — click a pane or press 1–4 / Tab");
     let mut pending_target: Option<(String, String)> = None;
-    let mut broker_ok = ctx.jobs.broker().health().await.unwrap_or(false);
+    let mut broker_ok = if ctx.jobs.tts_enabled() {
+        ctx.jobs.broker().health().await.unwrap_or(false)
+    } else {
+        false
+    };
     let mut log_scroll: usize = 0;
     let mut log_follow_tail = true;
     let mut selected_job_id: Option<Uuid> = None;
@@ -447,10 +451,12 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
             hit.deployments = chunks[1];
             hit.footer = chunks[4];
 
-            let broker_span = if broker_ok {
-                Span::styled("broker ●", Style::default().fg(Color::Green))
+            let broker_span = if !ctx.jobs.tts_enabled() {
+                Span::styled("tts off", Style::default().fg(Color::DarkGray))
+            } else if broker_ok {
+                Span::styled("tts broker ●", Style::default().fg(Color::Green))
             } else {
-                Span::styled("broker ○", Style::default().fg(Color::Yellow))
+                Span::styled("tts broker ○", Style::default().fg(Color::Yellow))
             };
             let running_span = if running_count > 0 {
                 Span::styled(
@@ -555,7 +561,11 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
             }
         })?;
 
-        broker_ok = ctx.jobs.broker().health().await.unwrap_or(false);
+        broker_ok = if ctx.jobs.tts_enabled() {
+            ctx.jobs.broker().health().await.unwrap_or(false)
+        } else {
+            false
+        };
     }
 
     if let Some(handle) = api {

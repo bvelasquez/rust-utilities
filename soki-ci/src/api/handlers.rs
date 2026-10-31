@@ -96,6 +96,7 @@ pub async fn trigger_build(
     let config = state
         .load_config()
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    state.jobs.update_speak(&config);
     let project = find_project(&config, &project_id)
         .ok_or_else(|| ApiError::not_found(format!("unknown project `{project_id}`")))?;
     let target = project.targets.get(&build_id).ok_or_else(|| {

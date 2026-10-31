@@ -18,8 +18,35 @@ soki-ci   # TUI + HTTP API on 127.0.0.1:9847
 - **Config:** user-wide `projects.yaml` only (`soki-ci config path`).
 - **Quit:** warns if jobs are running; closing the TUI does **not** stop deploy children (API stops with the TUI).
 - **Runners:** `pnpm_script`, `npm_script`, `make` (runs `make <target>` in project or target `cwd`), `shell`.
-- **Voice:** `POST /v1/tts/speak` on the broker — no `broker-cli` binary required.
+- **Voice (optional):** broker TTS announces terminal deploy success/error via `POST /v1/tts/speak` on [tts-stt-broker](https://github.com/bvelasquez/tts-stt-broker) — no `broker-cli` binary required. Defaults to `http://127.0.0.1:18888`; omit `voice` to use the broker's configured voice. Silence it globally with `enabled: false` or per target with `speak: false`.
 - **HTTP API:** started with the TUI by default (`--bind`, default `127.0.0.1:9847`). Use `--no-api` for TUI-only, or `soki-ci serve` for API-only. `GET /capabilities` returns the full agent manifest (routes, JSON schemas, CLI, env). `GET /projects/builds` lists configured deploy targets as `builds`; `POST /projects/{project_id}/builds/{build_id}` queues a job. Set `SOKI_CI_API_TOKEN` when binding beyond localhost.
+
+## Spoken deploy status (optional)
+
+When the local TTS broker is running, soki-ci can announce how each deploy finished:
+
+```yaml
+defaults:
+  speak:
+    enabled: true                    # false = silent
+    base_url: http://127.0.0.1:18888 # tts-stt-broker default
+    # voice: Kore                    # omit for the broker's default voice
+    on: [success, error]             # terminal states to announce
+```
+
+A target can override the global switch:
+
+```yaml
+targets:
+  testflight:
+    speak: false
+    runner: { kind: pnpm_script, script: mobile:testflight }
+```
+
+Successful deploys say e.g. “Simple Workout Firebase Hosting deploy succeeded.”; failures include the exit
+code and the last meaningful output line. Broker failures are logged in the job output as
+`speak warning:` and never change the deploy result. Env overrides: `TTS_BROKER_BASE_URL` and
+`TTS_BROKER_VOICE`.
 
 ## TUI navigation
 

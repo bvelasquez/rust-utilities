@@ -457,9 +457,13 @@ pub fn capabilities_json() -> serde_json::Value {
         },
         "broker": {
             "protocol": "HTTP",
+            "defaultBaseUrl": "http://127.0.0.1:18888",
+            "config": "defaults.speak { enabled, base_url, voice, on } in projects.yaml",
+            "envOverrides": ["TTS_BROKER_BASE_URL", "TTS_BROKER_VOICE"],
+            "voice": "optional; omit to use the broker's configured default voice",
             "health": "GET /health",
             "speak": "POST /v1/tts/speak",
-            "note": "No broker-cli binary required; TTS on terminal job success/error only"
+            "note": "Controlled by defaults.speak.enabled (set false to silence) or per-target speak: true/false. No broker-cli binary required; TTS on terminal job success/error only; broker errors are logged and do not affect job status."
         },
         "workflow": {
             "discover": "GET /capabilities",
@@ -476,7 +480,8 @@ pub fn capabilities_json() -> serde_json::Value {
             "build_id in the API equals the target key in projects.yaml",
             "Job stdin: TUI `i` in log pane, POST /jobs/{job_id}/input, or `soki-ci jobs input -i <id> --text y --yes`",
             "Quit TUI with running jobs: warns then detaches (children keep running); API shuts down with the TUI",
-            "Speak only on success/error terminal states, not on job start"
+            "Speak only on success/error terminal states, not on job start",
+            "TTS is optional: set defaults.speak.enabled false (or per-target speak: false); use TTS_BROKER_BASE_URL for a non-default broker"
         ]
     })
 }

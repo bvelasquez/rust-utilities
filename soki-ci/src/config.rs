@@ -49,8 +49,9 @@ fn default_max_parallel() -> usize {
 pub struct SpeakDefaults {
     #[serde(default = "default_speak_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_voice")]
-    pub voice: String,
+    /// Omit to use the broker's configured default voice.
+    #[serde(default)]
+    pub voice: Option<String>,
     #[serde(default = "default_broker_url")]
     pub base_url: String,
     #[serde(default = "default_speak_on")]
@@ -61,7 +62,7 @@ impl Default for SpeakDefaults {
     fn default() -> Self {
         Self {
             enabled: default_speak_enabled(),
-            voice: default_voice(),
+            voice: None,
             base_url: default_broker_url(),
             on: default_speak_on(),
         }
@@ -72,16 +73,31 @@ fn default_speak_enabled() -> bool {
     true
 }
 
-fn default_voice() -> String {
-    "Leda".into()
-}
-
 fn default_broker_url() -> String {
-    "http://127.0.0.1:8787".into()
+    "http://127.0.0.1:18888".into()
 }
 
 fn default_speak_on() -> Vec<SpeakEvent> {
     vec![SpeakEvent::Success, SpeakEvent::Error]
+}
+
+impl SpeakDefaults {
+    /// Environment overrides win over YAML, matching the documented precedence.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(url) = std::env::var("TTS_BROKER_BASE_URL") {
+            if !url.trim().is_empty() {
+                self.base_url = url.trim().to_string();
+            }
+        }
+        if let Ok(voice) = std::env::var("TTS_BROKER_VOICE") {
+            let voice = voice.trim();
+            self.voice = if voice.is_empty() {
+                None
+            } else {
+                Some(voice.to_string())
+            };
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,7 +212,9 @@ pub fn resolve_file_config(path: &Path, file: FileConfig) -> Result<ResolvedConf
         );
     }
 
-    let projects_dir = expand_path(&file.defaults.projects_dir)?;
+    let mut defaults = file.defaults;
+    defaults.speak.apply_env_overrides();
+    let projects_dir = expand_path(&defaults.projects_dir)?;
     let mut projects = Vec::new();
 
     for proj in file.projects {
@@ -241,7 +259,7 @@ pub fn resolve_file_config(path: &Path, file: FileConfig) -> Result<ResolvedConf
 
     Ok(ResolvedConfig {
         path: path.to_path_buf(),
-        defaults: file.defaults,
+        defaults,
         projects,
     })
 }

@@ -64,8 +64,20 @@ async fn wait_for_job(ctx: &AppContext, id: Uuid) -> Result<()> {
     loop {
         if let Some(job) = ctx.jobs.get_job(id).await {
             match job.phase {
-                JobPhase::Success => return Ok(()),
+                JobPhase::Success => {
+                    if ctx.jobs.speech_pending(id).await {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    return Ok(());
+                }
                 JobPhase::Error | JobPhase::Cancelled => {
+                    // Keep the process alive until the failure announcement has
+                    // been sent; otherwise exiting would cancel the request.
+                    if ctx.jobs.speech_pending(id).await {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
                     bail!("job {id} finished with {:?}", job.phase);
                 }
                 JobPhase::Queued | JobPhase::Running => {

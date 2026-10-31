@@ -40,6 +40,7 @@ impl AppContext {
 
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = load_config(&self.config_path)?;
+        self.jobs.update_speak(&self.config);
         Ok(())
     }
 }

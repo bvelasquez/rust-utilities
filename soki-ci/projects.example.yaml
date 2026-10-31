@@ -9,8 +9,9 @@ defaults:
   max_parallel: 4
   speak:
     enabled: true
-    voice: Leda
-    base_url: http://127.0.0.1:8787
+    # Omit `voice` to use the broker's configured default voice.
+    # voice: Kore
+    base_url: http://127.0.0.1:18888
     on: [success, error]
 
 projects:
@@ -115,14 +116,14 @@ projects:
     path: "${projects_dir}/flatland3"
     targets:
       deploy-oracle:
-        label: Deploy Oracle
+        label: Deploy Oracle (code only)
         runner: { kind: make, target: deploy-oracle }
-      publish-oracle:
-        label: Publish Oracle
-        runner: { kind: make, target: publish-oracle }
-      sync-content-oracle:
-        label: Sync Content Oracle
-        runner: { kind: make, target: sync-content-oracle }
+      sync-oracle-pull:
+        label: Sync content Oracle → local (pull --apply)
+        runner: { kind: make, target: sync-oracle-pull }
+      sync-oracle-push:
+        label: "Sync content local → Oracle (terminal: FILES=… APPLY=1 make sync-oracle-push)"
+        runner: { kind: make, target: sync-oracle-push }
       gfx-install:
         label: Install Gfx Client
         runner: { kind: make, target: gfx-install }

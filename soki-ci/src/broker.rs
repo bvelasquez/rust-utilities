@@ -5,21 +5,28 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct BrokerClient {
     base_url: String,
-    voice: String,
+    voice: Option<String>,
     client: reqwest::Client,
 }
 
 impl BrokerClient {
-    pub fn new(base_url: impl Into<String>, voice: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, voice: Option<String>) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            // /v1/tts/speak returns after local playback finishes; long text can
+            // easily exceed the old 30s limit.
+            .timeout(Duration::from_secs(180))
+            .connect_timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            voice: voice.into(),
+            voice: voice.filter(|v| !v.trim().is_empty()),
             client,
         }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     pub async fn health(&self) -> Result<bool> {
@@ -28,13 +35,15 @@ impl BrokerClient {
         Ok(res.status().is_success())
     }
 
-    /// Fire-and-forget TTS (does not wait for playback to finish).
+    /// Fire-and-forget TTS request (the broker plays audio on its own host).
     pub async fn speak(&self, text: &str) -> Result<()> {
         let url = format!("{}/v1/tts/speak", self.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "text": text,
-            "voice": self.voice,
         });
+        if let Some(voice) = &self.voice {
+            body["voice"] = serde_json::Value::String(voice.clone());
+        }
         let res = self
             .client
             .post(&url)
