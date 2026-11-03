@@ -48,7 +48,8 @@ pub fn capabilities_json() -> serde_json::Value {
             "Mutations require `--yes` or `--dry-run` when stdout is not a TTY",
             "Deletes require `safety.allow_delete = true` or `--allow-delete`",
             "AUTO applies only safe actions at safety.auto_apply_min_confidence (default 0.88) and saves those LLM patterns as rules",
-            "Rule patterns: subject:/from:/domain:/header:/body:/has:list-unsubscribe/all:A+B",
+            "Rule patterns: subject:/from:/domain:/header:/body:/lang:es/has:list-unsubscribe/all:A+B",
+            "Builtin: Spanish-language mail (lang:es) is auto-deleted as spam; override with a more specific keep rule",
             "Run `mail-sweep rules audit --json` to review AI merge suggestions before `--yes`"
         ]
     })

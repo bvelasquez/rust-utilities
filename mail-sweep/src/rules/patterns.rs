@@ -37,6 +37,7 @@ pub enum PatternKind {
     Header { name: String, value: Option<String> },
     Body(String),
     HasListUnsubscribe,
+    Lang(String),
     Bare(String),
 }
 
@@ -63,6 +64,20 @@ pub fn validate_pattern(pattern: &str) -> PatternValidation {
             kind: PatternKind::HasListUnsubscribe,
             uses_regex: false,
             error: None,
+        };
+    }
+
+    if let Some(rest) = pattern.strip_prefix("lang:") {
+        let code = rest.trim().to_ascii_lowercase();
+        let error = match code.as_str() {
+            "" => Some("lang: needs a language code (e.g. lang:es)".into()),
+            "es" | "spanish" => None,
+            _ => Some(format!("unsupported language code '{code}' (supported: es)")),
+        };
+        return PatternValidation {
+            kind: PatternKind::Lang(code),
+            uses_regex: false,
+            error,
         };
     }
 
@@ -168,6 +183,7 @@ pub fn pattern_specificity(pattern: &str) -> u8 {
         1
     } else if pattern.starts_with("header:")
         || pattern.starts_with("body:")
+        || pattern.starts_with("lang:")
         || pattern == "has:list-unsubscribe"
     {
         2
