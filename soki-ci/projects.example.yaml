@@ -7,6 +7,7 @@ version: 1
 defaults:
   projects_dir: ~/projects
   max_parallel: 4
+  history_limit: 500
   speak:
     enabled: true
     # Omit `voice` to use the broker's configured default voice.
@@ -19,6 +20,9 @@ projects:
     name: Simple Food Track
     path: "${projects_dir}/simple-food-track"
     package_manager: pnpm
+    group: Firebase Apps
+    tags: [web, firebase]
+    description: Food tracking app
     targets:
       hosting:
         label: Firebase Hosting
@@ -29,6 +33,13 @@ projects:
         runner:
           kind: pnpm_script
           script: deploy:functions
+      all:
+        label: "DANGER: Deploy everything (rules, indexes, functions, hosting)"
+        danger: true
+        description: Runs every Firebase deploy step for this project
+        runner:
+          kind: pnpm_script
+          script: deploy:all
       testflight:
         label: iOS TestFlight
         runner:

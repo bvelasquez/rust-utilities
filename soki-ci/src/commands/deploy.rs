@@ -25,19 +25,17 @@ pub async fn run(
 
     if all {
         for (tid, target) in &project.targets {
-            let id = ctx.jobs.enqueue(project, target).await?;
+            let id = ctx.jobs.enqueue_with_source(project, target, "cli").await?;
             ids.push((tid.clone(), id));
             wait_for_job(ctx, id).await?;
         }
     } else {
-        let tid = target_id.ok_or_else(|| {
-            anyhow::anyhow!("specify --target <id> or --all")
-        })?;
+        let tid = target_id.ok_or_else(|| anyhow::anyhow!("specify --target <id> or --all"))?;
         let target = project
             .targets
             .get(tid)
             .ok_or_else(|| anyhow::anyhow!("unknown target `{tid}` for project `{project_id}`"))?;
-        let id = ctx.jobs.enqueue(project, target).await?;
+        let id = ctx.jobs.enqueue_with_source(project, target, "cli").await?;
         ids.push((tid.to_string(), id));
     }
 
@@ -71,7 +69,7 @@ async fn wait_for_job(ctx: &AppContext, id: Uuid) -> Result<()> {
                     }
                     return Ok(());
                 }
-                JobPhase::Error | JobPhase::Cancelled => {
+                JobPhase::Error | JobPhase::Cancelled | JobPhase::Interrupted => {
                     // Keep the process alive until the failure announcement has
                     // been sent; otherwise exiting would cancel the request.
                     if ctx.jobs.speech_pending(id).await {

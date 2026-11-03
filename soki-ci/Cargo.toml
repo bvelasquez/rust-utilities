@@ -9,7 +9,7 @@ repository = "https://github.com/bvelasquez/rust-utilities"
 homepage = "https://github.com/bvelasquez/rust-utilities/tree/main/soki-ci"
 keywords = ["cli", "deploy", "tui", "firebase", "ci"]
 categories = ["command-line-utilities"]
-include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE", "projects.example.yaml"]
+include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE", "projects.example.yaml", "web/dist/**/*"]
 
 [lib]
 name = "soki_ci"
@@ -21,18 +21,24 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+async-stream = "0.3"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"
 dirs = "5"
 directories = "5"
+futures-util = "0.3"
+libc = "0.2"
+mime_guess = "2"
 ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "io-util", "sync", "fs", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 

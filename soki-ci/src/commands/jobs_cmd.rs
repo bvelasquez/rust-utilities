@@ -96,8 +96,7 @@ pub async fn run_input(
 pub fn run_reset(ctx: &AppContext, yes: bool, json: bool) -> Result<()> {
     require_yes(yes, "reset job history")?;
     let removed = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(ctx.jobs.clear_history())
+        tokio::runtime::Handle::current().block_on(ctx.jobs.clear_history())
     })?;
     let data = json!({ "removed": removed });
     if json {
@@ -112,14 +111,13 @@ pub fn run_cancel(ctx: &AppContext, id: &str, yes: bool, json: bool) -> Result<(
     require_yes(yes, "cancel job")?;
     let uuid = Uuid::parse_str(id)?;
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(ctx.jobs.cancel(uuid))
+        tokio::runtime::Handle::current().block_on(ctx.jobs.cancel(uuid))
     })?;
     let data = json!({ "id": id, "cancelled": true });
     if json {
         Envelope::ok("jobs cancel", data).print_json()?;
     } else {
-        println!("cancelled {id} (process may still run until v1.1 kill support)");
+        println!("cancelled {id} (process group terminated)");
     }
     Ok(())
 }

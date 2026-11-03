@@ -18,6 +18,9 @@ pub fn builds_catalog(cfg: &ResolvedConfig) -> serde_json::Value {
                     json!({
                         "id": id,
                         "label": t.label,
+                        "runner": t.runner,
+                        "danger": t.danger,
+                        "tags": t.tags,
                     })
                 })
                 .collect();
@@ -25,6 +28,9 @@ pub fn builds_catalog(cfg: &ResolvedConfig) -> serde_json::Value {
                 "id": p.id,
                 "name": p.name,
                 "path": p.path,
+                "group": p.group,
+                "tags": p.tags,
+                "description": p.description,
                 "builds": builds,
             })
         })

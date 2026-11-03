@@ -4,6 +4,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::config::{PackageManager, ResolvedProject, ResolvedTarget, RunnerConfig};
+use crate::jobs::LogStream;
 
 pub struct SpawnSpec {
     pub program: String,
@@ -22,9 +23,9 @@ pub fn build_spawn_spec(project: &ResolvedProject, target: &ResolvedTarget) -> R
             ("pnpm".into(), vec!["run".into(), script.clone()])
         }
         RunnerConfig::NpmScript { script } => ("npm".into(), vec!["run".into(), script.clone()]),
-        RunnerConfig::Make { target: make_target } => {
-            ("make".into(), vec![make_target.clone()])
-        }
+        RunnerConfig::Make {
+            target: make_target,
+        } => ("make".into(), vec![make_target.clone()]),
         RunnerConfig::Shell { command } => {
             if command.is_empty() {
                 bail!("empty shell command");
@@ -54,6 +55,13 @@ pub async fn spawn_deploy(spec: &SpawnSpec) -> Result<tokio::process::Child> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Put the deploy in its own process group so cancellation can terminate
+    // the package-manager child and everything it spawned.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
@@ -65,8 +73,8 @@ pub async fn spawn_deploy(spec: &SpawnSpec) -> Result<tokio::process::Child> {
 /// that never get a newline (typical `y/N` questions) after a short idle.
 pub async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
-    tx: tokio::sync::mpsc::Sender<String>,
-    prefix: &'static str,
+    tx: tokio::sync::mpsc::Sender<(LogStream, String)>,
+    stream: LogStream,
 ) {
     use tokio::io::AsyncReadExt;
     use tokio::time::{timeout, Duration};
@@ -78,7 +86,7 @@ pub async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
             Ok(Ok(0)) => {
                 if !buf.is_empty() {
                     let line = String::from_utf8_lossy(&buf).into_owned();
-                    let _ = tx.send(format!("{prefix}{line}")).await;
+                    let _ = tx.send((stream, line)).await;
                 }
                 break;
             }
@@ -93,7 +101,7 @@ pub async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
                         line.pop();
                     }
                     let s = String::from_utf8_lossy(&line).into_owned();
-                    if tx.send(format!("{prefix}{s}")).await.is_err() {
+                    if tx.send((stream, s)).await.is_err() {
                         return;
                     }
                 }
@@ -103,7 +111,7 @@ pub async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
                 if !buf.is_empty() {
                     let s = String::from_utf8_lossy(&buf).into_owned();
                     buf.clear();
-                    if tx.send(format!("{prefix}{s}")).await.is_err() {
+                    if tx.send((stream, s)).await.is_err() {
                         return;
                     }
                 }
@@ -113,15 +121,7 @@ pub async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
 }
 
 pub fn log_dir() -> Result<std::path::PathBuf> {
-    let base = if let Some(proj) = directories::ProjectDirs::from("com.soki-ci", "soki-ci", "soki-ci")
-    {
-        proj.data_dir().to_path_buf()
-    } else {
-        let mut p = dirs::home_dir().context("home")?;
-        p.push(".soki-ci");
-        p
-    };
-    std::fs::create_dir_all(&base)?;
+    let base = crate::history::data_dir()?;
     Ok(base.join("runs"))
 }
 
@@ -132,12 +132,17 @@ pub fn log_path_for(job_id: &uuid::Uuid) -> Result<std::path::PathBuf> {
 }
 
 pub async fn append_log(path: &Path, line: &str) -> Result<()> {
+    append_log_stream(path, LogStream::Stdout, line).await
+}
+
+pub async fn append_log_stream(path: &Path, stream: LogStream, line: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .await?;
+    file.write_all(stream.file_prefix().as_bytes()).await?;
     file.write_all(line.as_bytes()).await?;
     file.write_all(b"\n").await?;
     Ok(())

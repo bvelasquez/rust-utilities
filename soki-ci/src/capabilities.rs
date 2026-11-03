@@ -25,16 +25,28 @@ fn job_schema() -> Value {
             "target_label": { "type": "string" },
             "phase": {
                 "type": "string",
-                "enum": ["queued", "running", "success", "error", "cancelled"]
+                "enum": ["queued", "running", "success", "error", "cancelled", "interrupted"]
             },
+            "created_at": { "type": "string", "format": "date-time" },
             "started_at": { "type": ["string", "null"], "format": "date-time" },
             "finished_at": { "type": ["string", "null"], "format": "date-time" },
             "exit_code": { "type": ["integer", "null"] },
-            "log_path": { "type": "string", "description": "Path to log file on disk" }
+            "duration_ms": { "type": ["integer", "null"] },
+            "source": { "type": "string", "description": "tui | cli | api | web" },
+            "runner": { "type": "string" },
+            "cwd": { "type": "string" },
+            "log_path": { "type": "string", "description": "Path to log file on disk" },
+            "interrupted": { "type": "boolean" },
+            "cancel_requested": { "type": "boolean" },
+            "can_cancel": { "type": "boolean" },
+            "can_input": { "type": "boolean" },
+            "log_size_bytes": { "type": "integer" }
         },
         "required": [
             "id", "project_id", "project_name", "target_id", "target_label",
-            "phase", "started_at", "finished_at", "exit_code", "log_path"
+            "phase", "created_at", "started_at", "finished_at", "exit_code",
+            "duration_ms", "source", "runner", "cwd", "log_path", "interrupted",
+            "cancel_requested", "can_cancel", "can_input", "log_size_bytes"
         ],
         "additionalProperties": false
     })
@@ -309,6 +321,190 @@ fn http_endpoints() -> Value {
                 { "status": 409, "description": "Job not running or stdin not available", "schema": error },
                 { "status": 500, "description": "Internal error", "schema": error }
             ]
+        },
+        {
+            "method": "GET",
+            "path": "/api/status",
+            "authentication": true,
+            "description": "Rich service status: version, uptime, bind, config path, queue limits, project locks, TTS health",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Service status", "contentType": "application/json", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/projects",
+            "authentication": true,
+            "description": "Project/target catalog with runner metadata, env keys, danger flags, stats, and active/last jobs",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Project catalog", "contentType": "application/json", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/projects/{project_id}",
+            "authentication": true,
+            "description": "One enriched project record",
+            "request": { "pathParameters": [{ "name": "project_id", "type": "string" }], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Project", "schema": { "type": "object" } }, { "status": 404, "description": "Unknown project", "schema": error }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/projects/{project_id}/builds/{build_id}",
+            "authentication": true,
+            "description": "Queue a deploy from the web UI (source=web)",
+            "request": { "pathParameters": [{ "name": "project_id", "type": "string" }, { "name": "build_id", "type": "string" }], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 202, "description": "Queued", "schema": { "type": "object" } }, { "status": 409, "description": "Project already busy", "schema": error }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/jobs",
+            "authentication": true,
+            "description": "Paginated, filterable job history (project, target, phase, source, q, limit, offset)",
+            "request": { "pathParameters": [], "queryParameters": [{ "name": "project" }, { "name": "target" }, { "name": "phase" }, { "name": "source" }, { "name": "q" }, { "name": "limit" }, { "name": "offset" }], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Jobs page + stats", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/jobs/reset",
+            "authentication": true,
+            "description": "Delete finished jobs and log files; active jobs are kept",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Removed count", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/jobs/{job_id}",
+            "authentication": true,
+            "description": "One job with computed can_cancel/can_input/log_size_bytes",
+            "request": { "pathParameters": [{ "name": "job_id", "type": "string", "format": "uuid" }], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Job", "schema": { "type": "object" } }, { "status": 404, "description": "Not found", "schema": error }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/jobs/{job_id}/logs",
+            "authentication": true,
+            "description": "Log lines (JSON or text). Query: tail, format=text, download=true",
+            "request": { "pathParameters": [{ "name": "job_id", "type": "string" }], "queryParameters": [{ "name": "tail" }, { "name": "format" }, { "name": "download" }], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Log lines or raw file", "schema": { "type": "object" } }, { "status": 404, "description": "Not found", "schema": error }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/jobs/{job_id}/events",
+            "authentication": true,
+            "description": "Server-Sent Events stream: snapshot, log, resync, job, removed, heartbeat",
+            "request": { "pathParameters": [{ "name": "job_id", "type": "string" }], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "text/event-stream" }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/jobs/{job_id}/cancel",
+            "authentication": true,
+            "description": "Cancel a queued/running job; running jobs get SIGTERM then SIGKILL after a grace period",
+            "request": { "pathParameters": [{ "name": "job_id", "type": "string" }], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 202, "description": "Cancellation requested", "schema": { "type": "object" } }, { "status": 409, "description": "Job not running", "schema": error }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/jobs/{job_id}/retry",
+            "authentication": true,
+            "description": "Re-enqueue the same project/target, returning a new job id",
+            "request": { "pathParameters": [{ "name": "job_id", "type": "string" }], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 202, "description": "Retry queued", "schema": { "type": "object" } }, { "status": 409, "description": "Project busy", "schema": error }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/jobs/{job_id}/input",
+            "authentication": true,
+            "description": "Write text to a running job's stdin (same as the existing /jobs route)",
+            "request": { "pathParameters": [{ "name": "job_id", "type": "string" }], "queryParameters": [], "headers": [{ "name": "Content-Type", "required": true, "value": "application/json" }], "body": { "contentType": "application/json", "schema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] } } },
+            "responses": [{ "status": 200, "description": "Input accepted", "schema": { "type": "object" } }, { "status": 409, "description": "Not running", "schema": error }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/events",
+            "authentication": true,
+            "description": "Global Server-Sent Events stream: snapshot, job, removed, config, heartbeat",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "text/event-stream" }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/config",
+            "authentication": true,
+            "description": "Resolved config, validation issues, and optional raw YAML (?raw=true)",
+            "request": { "pathParameters": [], "queryParameters": [{ "name": "raw" }], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Config", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/config/validate",
+            "authentication": true,
+            "description": "Validate config paths, runners, and package scripts",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Validation issues", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/config/reload",
+            "authentication": true,
+            "description": "Reload projects.yaml and broadcast a config event",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Reloaded config", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "PUT",
+            "path": "/api/config",
+            "authentication": true,
+            "description": "Write YAML (requires --allow-config-write); validates, backs up, and reloads",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": { "contentType": "application/json", "schema": { "type": "object", "properties": { "yaml": { "type": "string" } }, "required": ["yaml"] } } },
+            "responses": [{ "status": 200, "description": "Saved or validation errors", "schema": { "type": "object" } }, { "status": 403, "description": "Writes disabled", "schema": error }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/tts",
+            "authentication": true,
+            "description": "TTS broker settings and reachability",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "TTS status", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/tts/test",
+            "authentication": true,
+            "description": "Speak a test phrase through the broker",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": { "contentType": "application/json", "schema": { "type": "object", "properties": { "text": { "type": "string" } } } } },
+            "responses": [{ "status": 200, "description": "Spoken", "schema": { "type": "object" } }, { "status": 502, "description": "Broker error", "schema": error }]
+        },
+        {
+            "method": "GET",
+            "path": "/api/session",
+            "authentication": false,
+            "description": "Browser auth state; returns CSRF token for cookie sessions",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "Session state", "schema": { "type": "object" } }]
+        },
+        {
+            "method": "POST",
+            "path": "/api/session",
+            "authentication": false,
+            "description": "Exchange SOKI_CI_API_TOKEN for an HttpOnly session cookie",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": { "contentType": "application/json", "schema": { "type": "object", "properties": { "token": { "type": "string" } }, "required": ["token"] } } },
+            "responses": [{ "status": 200, "description": "Logged in", "schema": { "type": "object" } }, { "status": 401, "description": "Invalid token", "schema": error }]
+        },
+        {
+            "method": "DELETE",
+            "path": "/api/session",
+            "authentication": false,
+            "description": "Log out and clear the browser session cookie",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 204, "description": "Logged out" }]
+        },
+        {
+            "method": "GET",
+            "path": "/",
+            "authentication": false,
+            "description": "Embedded React web dashboard (SPA). Data routes require auth when a token is configured.",
+            "request": { "pathParameters": [], "queryParameters": [], "headers": [], "body": null },
+            "responses": [{ "status": 200, "description": "text/html" }]
         }
     ])
 }
@@ -372,20 +568,26 @@ fn cli_commands() -> Value {
         {
             "id": "jobs cancel",
             "mutation": true,
-            "description": "Mark job cancelled (v1: does not kill child)",
+            "description": "Cancel a queued/running job; running process groups get SIGTERM then SIGKILL",
             "flags": ["-i/--id", "--yes", "--config", "--json"]
         },
         {
             "id": "jobs reset",
             "mutation": true,
-            "description": "Remove finished deployments and log files from this process",
+            "description": "Remove finished deployments and log files from persistent history",
             "flags": ["--yes", "--config", "--json"]
         },
         {
             "id": "serve",
             "mutation": false,
-            "description": "HTTP API only (no TUI) — list and trigger deploys",
-            "flags": ["--bind", "--api-token", "--config"]
+            "description": "HTTP API + web dashboard (no TUI) — list and trigger deploys",
+            "flags": ["--bind", "--api-token", "--config", "--web-dir", "--allow-config-write", "--open"]
+        },
+        {
+            "id": "web",
+            "mutation": false,
+            "description": "Alias for serve: web dashboard + API, optionally opening the browser",
+            "flags": ["--bind", "--api-token", "--config", "--web-dir", "--allow-config-write", "--open"]
         },
         {
             "id": "capabilities",
@@ -412,7 +614,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "defaultBind": "127.0.0.1:9847",
             "bindEnv": "SOKI_CI_API_BIND",
             "bindFlag": "--bind",
-            "startedBy": ["soki-ci (TUI, default)", "soki-ci serve (API only)"],
+            "startedBy": ["soki-ci (TUI, default)", "soki-ci serve (API + web)", "soki-ci web (API + web, optional --open)"],
             "disableFlag": "--no-api",
             "sharedJobStore": "TUI and API in the same process share one in-memory job list",
             "authentication": {
@@ -421,8 +623,8 @@ pub fn capabilities_json() -> serde_json::Value {
                 "format": "Bearer <token>",
                 "env": "SOKI_CI_API_TOKEN",
                 "flag": "--api-token",
-                "whenRequired": "All routes except GET /health and GET /capabilities when a token is configured; binding to non-loopback addresses requires a token at startup",
-                "publicRoutes": ["GET /health", "GET /capabilities"]
+                "whenRequired": "All data routes when a token is configured; /health, /capabilities, /api/session, and the static web UI are public. Browser sessions use an HttpOnly cookie plus X-Soki-CSRF on mutations.",
+                "publicRoutes": ["GET /health", "GET /capabilities", "GET/POST/DELETE /api/session", "GET / (static web UI)"]
             },
             "endpoints": http_endpoints()
         },
@@ -465,23 +667,38 @@ pub fn capabilities_json() -> serde_json::Value {
             "speak": "POST /v1/tts/speak",
             "note": "Controlled by defaults.speak.enabled (set false to silence) or per-target speak: true/false. No broker-cli binary required; TTS on terminal job success/error only; broker errors are logged and do not affect job status."
         },
+        "web": {
+            "url": "/",
+            "stack": "React 19 + TypeScript + Vite",
+            "auth": "Static UI is public; data routes require the bearer token or a browser session cookie. POST /api/session exchanges the token for an HttpOnly cookie and returns a CSRF token for mutations.",
+            "streaming": "SSE at /api/events (job state) and /api/jobs/{job_id}/events (logs)",
+            "history": "Sidecar JSON + log files in {SOKI_CI_DATA_DIR}/runs; active jobs are marked interrupted on startup",
+            "configWrite": "PUT /api/config is disabled unless --allow-config-write is set"
+        },
         "workflow": {
-            "discover": "GET /capabilities",
-            "listTargets": "GET /projects/builds",
-            "triggerDeploy": "POST /projects/{project_id}/builds/{build_id}",
-            "pollJob": "GET /jobs/{job_id}",
-            "answerPrompt": "POST /jobs/{job_id}/input with {\"text\":\"y\"}",
-            "readLogs": "soki-ci jobs logs -i <job_id> --tail 50 --json (log_path on job record)"
+            "discover": "GET /capabilities or GET /api/status",
+            "legacyListTargets": "GET /projects/builds",
+            "listTargets": "GET /api/projects",
+            "triggerDeploy": "POST /api/projects/{project_id}/builds/{build_id}",
+            "pollJob": "GET /api/jobs/{job_id}",
+            "streamJob": "GET /api/jobs/{job_id}/events (SSE)",
+            "readLogs": "GET /api/jobs/{job_id}/logs?tail=500 (or format=text)",
+            "cancelJob": "POST /api/jobs/{job_id}/cancel",
+            "retryJob": "POST /api/jobs/{job_id}/retry",
+            "answerPrompt": "POST /api/jobs/{job_id}/input with {\"text\":\"y\"}",
+            "reloadConfig": "POST /api/config/reload"
         },
         "agentHints": [
             "Start with GET /capabilities (or `soki-ci capabilities --json`) before automation",
             "Use `soki-ci config validate --json` after editing projects.yaml",
             "Deploy via CLI: `soki-ci deploy run -p <id> -t <target> --yes --json`",
             "build_id in the API equals the target key in projects.yaml",
-            "Job stdin: TUI `i` in log pane, POST /jobs/{job_id}/input, or `soki-ci jobs input -i <id> --text y --yes`",
+            "Job stdin: TUI `i` in log pane, POST /api/jobs/{job_id}/input, POST /jobs/{job_id}/input, or `soki-ci jobs input -i <id> --text y --yes`",
             "Quit TUI with running jobs: warns then detaches (children keep running); API shuts down with the TUI",
             "Speak only on success/error terminal states, not on job start",
-            "TTS is optional: set defaults.speak.enabled false (or per-target speak: false); use TTS_BROKER_BASE_URL for a non-default broker"
+            "TTS is optional: set defaults.speak.enabled false (or per-target speak: false); use TTS_BROKER_BASE_URL for a non-default broker",
+            "Web UI: open / after `soki-ci serve` or `soki-ci web`; use /api/session for browser auth when SOKI_CI_API_TOKEN is set",
+            "History: persisted in runs/{job_id}.json + .log; use GET /api/jobs for paginated history and POST /api/jobs/reset to clear finished jobs"
         ]
     })
 }

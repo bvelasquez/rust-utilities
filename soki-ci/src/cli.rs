@@ -56,6 +56,31 @@ pub struct Cli {
     )]
     pub no_api: bool,
 
+    #[arg(
+        long,
+        global = true,
+        env = "SOKI_CI_WEB_DIR",
+        help = "Serve web assets from this directory instead of the embedded build"
+    )]
+    pub web_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        global = true,
+        env = "SOKI_CI_ALLOW_CONFIG_WRITE",
+        default_value_t = false,
+        help = "Allow PUT /api/config to rewrite projects.yaml (creates a .bak)"
+    )]
+    pub allow_config_write: bool,
+
+    #[arg(
+        long,
+        global = true,
+        default_value_t = false,
+        help = "Open the web UI in the default browser (serve/web)"
+    )]
+    pub open: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -86,6 +111,8 @@ pub enum Commands {
     },
     /// HTTP API only (no TUI) — list and trigger deploy builds
     Serve,
+    /// Web dashboard + API (no TUI); alias for `serve`
+    Web,
     /// Machine-readable command catalog
     Capabilities,
     /// Environment variable schema

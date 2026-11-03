@@ -20,6 +20,8 @@ pub struct Defaults {
     pub projects_dir: String,
     #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
+    #[serde(default = "default_history_limit")]
+    pub history_limit: usize,
     #[serde(default)]
     pub speak: SpeakDefaults,
     #[serde(default)]
@@ -31,10 +33,15 @@ impl Default for Defaults {
         Self {
             projects_dir: default_projects_dir(),
             max_parallel: default_max_parallel(),
+            history_limit: default_history_limit(),
             speak: SpeakDefaults::default(),
             confirm_deploys: true,
         }
     }
+}
+
+fn default_history_limit() -> usize {
+    500
 }
 
 fn default_projects_dir() -> String {
@@ -115,6 +122,12 @@ pub struct ProjectConfig {
     pub path: String,
     #[serde(default)]
     pub package_manager: Option<PackageManager>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub targets: BTreeMap<String, TargetConfig>,
 }
 
@@ -138,6 +151,12 @@ pub struct TargetConfig {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub speak: Option<bool>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub danger: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +181,9 @@ pub struct ResolvedProject {
     pub name: String,
     pub path: PathBuf,
     pub package_manager: PackageManager,
+    pub group: Option<String>,
+    pub tags: Vec<String>,
+    pub description: Option<String>,
     pub targets: BTreeMap<String, ResolvedTarget>,
 }
 
@@ -174,6 +196,9 @@ pub struct ResolvedTarget {
     pub env: BTreeMap<String, String>,
     pub timeout_secs: Option<u64>,
     pub speak: Option<bool>,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+    pub danger: bool,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -196,8 +221,8 @@ pub fn resolve_config_path(override_path: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn load_config(path: &Path) -> Result<ResolvedConfig> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read config {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
     let file: FileConfig =
         serde_yaml::from_str(&raw).with_context(|| format!("parse YAML {}", path.display()))?;
     resolve_file_config(path, file)
@@ -214,14 +239,22 @@ pub fn resolve_file_config(path: &Path, file: FileConfig) -> Result<ResolvedConf
 
     let mut defaults = file.defaults;
     defaults.speak.apply_env_overrides();
+    if let Ok(value) = std::env::var("SOKI_CI_MAX_PARALLEL") {
+        if let Ok(parsed) = value.trim().parse::<usize>() {
+            defaults.max_parallel = parsed.max(1);
+        }
+    }
+    if let Ok(value) = std::env::var("SOKI_CI_HISTORY_LIMIT") {
+        if let Ok(parsed) = value.trim().parse::<usize>() {
+            defaults.history_limit = parsed.max(1);
+        }
+    }
     let projects_dir = expand_path(&defaults.projects_dir)?;
     let mut projects = Vec::new();
 
     for proj in file.projects {
         let pm = proj.package_manager.unwrap_or(PackageManager::Pnpm);
-        let name = proj
-            .name
-            .unwrap_or_else(|| proj.id.replace('-', " "));
+        let name = proj.name.unwrap_or_else(|| proj.id.replace('-', " "));
         let base_path = expand_with_projects_dir(&proj.path, &projects_dir)?;
 
         let mut targets = BTreeMap::new();
@@ -231,9 +264,10 @@ pub fn resolve_file_config(path: &Path, file: FileConfig) -> Result<ResolvedConf
             } else {
                 base_path.clone()
             };
-            let label = tcfg
-                .label
-                .unwrap_or_else(|| humanize_id(&tid));
+            let label = tcfg.label.unwrap_or_else(|| humanize_id(&tid));
+            let danger = tcfg
+                .danger
+                .unwrap_or_else(|| label.trim_start().to_lowercase().starts_with("danger"));
             targets.insert(
                 tid.clone(),
                 ResolvedTarget {
@@ -244,6 +278,9 @@ pub fn resolve_file_config(path: &Path, file: FileConfig) -> Result<ResolvedConf
                     env: tcfg.env,
                     timeout_secs: tcfg.timeout_secs,
                     speak: tcfg.speak,
+                    description: tcfg.description,
+                    tags: tcfg.tags,
+                    danger,
                 },
             );
         }
@@ -253,6 +290,9 @@ pub fn resolve_file_config(path: &Path, file: FileConfig) -> Result<ResolvedConf
             name,
             path: base_path,
             package_manager: pm,
+            group: proj.group,
+            tags: proj.tags,
+            description: proj.description,
             targets,
         });
     }
@@ -306,11 +346,7 @@ pub fn validate_config(cfg: &ResolvedConfig) -> Vec<ValidationIssue> {
         if !p.path.is_dir() {
             issues.push(ValidationIssue {
                 level: "error",
-                message: format!(
-                    "project `{}`: path not found: {}",
-                    p.id,
-                    p.path.display()
-                ),
+                message: format!("project `{}`: path not found: {}", p.id, p.path.display()),
             });
         }
         if p.targets.is_empty() {
@@ -332,8 +368,7 @@ pub fn validate_config(cfg: &ResolvedConfig) -> Vec<ValidationIssue> {
                 });
             }
             match &target.runner {
-                RunnerConfig::PnpmScript { script }
-                | RunnerConfig::NpmScript { script } => {
+                RunnerConfig::PnpmScript { script } | RunnerConfig::NpmScript { script } => {
                     if let Ok(scripts) = read_package_scripts(&target.cwd) {
                         if !scripts.contains(script) {
                             issues.push(ValidationIssue {

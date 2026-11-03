@@ -34,8 +34,12 @@ projects:
 
 fn test_state(config_path: &std::path::Path) -> api::ApiState {
     let config = load_config(config_path).unwrap();
+    let data_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("data");
     api::ApiState::new(
-        Arc::new(JobOrchestrator::new(&config)),
+        Arc::new(JobOrchestrator::new_with_data_dir(&config, data_dir)),
         config_path.to_path_buf(),
         None,
     )
@@ -197,10 +201,18 @@ async fn spawn_api_health_and_shutdown() {
     let temp = tempfile::tempdir().unwrap();
     let config_path = write_test_config(&temp);
     let config = load_config(&config_path).unwrap();
-    let jobs = Arc::new(JobOrchestrator::new(&config));
-    let handle = api::spawn_api(jobs, config_path, "127.0.0.1:0".parse().unwrap(), None)
-        .await
-        .expect("spawn_api");
+    let data_dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("data");
+    let jobs = Arc::new(JobOrchestrator::new_with_data_dir(&config, data_dir));
+    let handle = api::spawn_api(
+        jobs,
+        config_path,
+        api::ApiOptions::new("127.0.0.1:0".parse().unwrap()),
+    )
+    .await
+    .expect("spawn_api");
     let addr = handle.bind;
 
     let client = reqwest::Client::new();
@@ -248,4 +260,416 @@ async fn api_capabilities_manifest() {
         .collect();
     assert!(paths.contains(&"/capabilities"));
     assert!(paths.contains(&"/projects/builds"));
+}
+
+#[tokio::test]
+async fn api_web_status_projects_logs_and_reset() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = write_test_config(&temp);
+    let state = test_state(&config_path);
+    let app = routes::router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["service"], "soki-ci");
+    assert_eq!(v["max_parallel"], 2);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["projects"][0]["id"], "api-test");
+    assert_eq!(v["projects"][0]["targets"][0]["id"], "ok");
+    assert!(v["projects"][0]["targets"][0]["runner_summary"]
+        .as_str()
+        .unwrap()
+        .contains("true"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/projects/api-test/builds/ok")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let job_id = v["job_id"].as_str().unwrap().to_string();
+
+    for _ in 0..60 {
+        if let Some(job) = state
+            .jobs
+            .get_job(uuid::Uuid::parse_str(&job_id).unwrap())
+            .await
+        {
+            if job.phase == JobPhase::Success {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/api/jobs/{job_id}/logs?tail=100"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| { line["line"].as_str().unwrap_or("").contains("queued:") }));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/jobs/reset")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["removed"], 1);
+}
+
+#[tokio::test]
+async fn api_cancel_stops_running_process() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("projects.yaml");
+    std::fs::write(
+        &path,
+        r#"
+version: 1
+defaults:
+  max_parallel: 1
+  speak:
+    enabled: false
+projects:
+  - id: cancel-test
+    path: "."
+    targets:
+      sleep:
+        runner:
+          kind: shell
+          command: ["sh", "-c", "sleep 30"]
+"#,
+    )
+    .unwrap();
+    let state = test_state(&path);
+    let app = routes::router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/projects/cancel-test/builds/sleep")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let job_id = v["job_id"].as_str().unwrap().to_string();
+
+    for _ in 0..80 {
+        if let Some(job) = state
+            .jobs
+            .get_job(uuid::Uuid::parse_str(&job_id).unwrap())
+            .await
+        {
+            if job.phase == JobPhase::Running {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/jobs/{job_id}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+
+    for _ in 0..120 {
+        if let Some(job) = state
+            .jobs
+            .get_job(uuid::Uuid::parse_str(&job_id).unwrap())
+            .await
+        {
+            if job.phase == JobPhase::Cancelled {
+                assert!(!job.can_cancel);
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("job was not cancelled in time");
+}
+
+#[tokio::test]
+async fn api_history_survives_restart_and_marks_active_jobs_interrupted() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("projects.yaml");
+    std::fs::write(
+        &path,
+        r#"
+version: 1
+defaults:
+  max_parallel: 1
+  speak:
+    enabled: false
+projects:
+  - id: history-test
+    path: "."
+    targets:
+      sleep:
+        runner:
+          kind: shell
+          command: ["sh", "-c", "sleep 2"]
+"#,
+    )
+    .unwrap();
+    let config = load_config(&path).unwrap();
+    let data_dir = temp.path().join("data");
+    let jobs = Arc::new(JobOrchestrator::new_with_data_dir(
+        &config,
+        data_dir.clone(),
+    ));
+    let project = config.projects.first().unwrap();
+    let target = project.targets.get("sleep").unwrap();
+    let id = jobs.enqueue(project, target).await.unwrap();
+
+    for _ in 0..80 {
+        if let Some(job) = jobs.get_job(id).await {
+            if job.phase == JobPhase::Running {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let reloaded = JobOrchestrator::new_with_data_dir(&config, data_dir);
+    reloaded.recover_interrupted().await;
+    let loaded = reloaded.list_jobs().await;
+    let job = loaded.iter().find(|job| job.id == id).expect("job loaded");
+    assert_eq!(job.phase, JobPhase::Interrupted);
+    assert!(job.interrupted);
+    assert!(!job.can_cancel);
+
+    jobs.cancel(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn api_session_auth_and_csrf() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = write_test_config(&temp);
+    let config = load_config(&config_path).unwrap();
+    let data_dir = config_path.parent().unwrap().join("data");
+    let state = api::ApiState::new(
+        Arc::new(JobOrchestrator::new_with_data_dir(&config, data_dir)),
+        config_path,
+        Some("secret".into()),
+    );
+    let app = routes::router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/session")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/session")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"secret"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let csrf = v["csrf_token"].as_str().unwrap().to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/jobs/reset")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/jobs/reset")
+                .header("cookie", &cookie)
+                .header("x-soki-csrf", csrf)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn api_config_write_is_gated_and_validates() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = write_test_config(&temp);
+    let mut state = test_state(&config_path);
+    state.allow_config_write = true;
+    let app = routes::router(state);
+
+    let yaml = r#"version: 1
+defaults:
+  max_parallel: 1
+  speak:
+    enabled: false
+projects:
+  - id: api-test
+    path: "."
+    targets:
+      ok:
+        runner:
+          kind: shell
+          command: ["true"]
+"#;
+    let body = serde_json::json!({ "yaml": yaml }).to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["ok"], true);
+    assert!(std::fs::read_to_string(&config_path)
+        .unwrap()
+        .contains("max_parallel: 1"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri("/api/config")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"yaml":"not: [valid"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
 }

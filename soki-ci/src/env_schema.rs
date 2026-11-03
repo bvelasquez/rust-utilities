@@ -9,18 +9,26 @@ pub fn env_schema_json() -> serde_json::Value {
             { "name": "SOKI_CI_API_BIND", "required": false, "secret": false, "description": "HTTP API listen address (host:port); default 127.0.0.1:9847; used by TUI and serve" },
             { "name": "SOKI_CI_API_TOKEN", "required": false, "secret": true, "description": "Bearer token for HTTP API when exposed beyond loopback" },
             { "name": "SOKI_CI_MAX_PARALLEL", "required": false, "secret": false, "description": "Override defaults.max_parallel in YAML" },
+            { "name": "SOKI_CI_HISTORY_LIMIT", "required": false, "secret": false, "description": "Override defaults.history_limit (persisted job records loaded/kept, default 500)" },
+            { "name": "SOKI_CI_DATA_DIR", "required": false, "secret": false, "description": "Override the data directory for runs/{id}.log and runs/{id}.json (tests, isolated instances)" },
+            { "name": "SOKI_CI_WEB_DIR", "required": false, "secret": false, "description": "Serve web assets from a directory instead of the embedded build" },
+            { "name": "SOKI_CI_ALLOW_CONFIG_WRITE", "required": false, "secret": false, "description": "Enable PUT /api/config (writes projects.yaml with a .bak)" },
             { "name": "TTS_BROKER_BASE_URL", "required": false, "secret": false, "description": "Overrides defaults.speak.base_url (default http://127.0.0.1:18888)" },
             { "name": "TTS_BROKER_VOICE", "required": false, "secret": false, "description": "Overrides defaults.speak.voice; unset uses the broker's configured voice" },
         ],
         "flags": {
             "--no-api": "Disable HTTP API when starting the TUI",
             "--bind": "Same as SOKI_CI_API_BIND",
-            "--api-token": "Same as SOKI_CI_API_TOKEN"
+            "--api-token": "Same as SOKI_CI_API_TOKEN",
+            "--web-dir": "Same as SOKI_CI_WEB_DIR",
+            "--allow-config-write": "Enable browser config editing via PUT /api/config",
+            "--open": "Open the web UI in the default browser (serve/web)"
         },
         "configFile": {
             "fields": {
                 "defaults.projects_dir": "Base path; expands ${projects_dir} in project paths",
                 "defaults.max_parallel": "Max concurrent deploy jobs across projects",
+                "defaults.history_limit": "Persisted job records loaded and kept in memory (default 500)",
                 "defaults.speak": "Optional HTTP broker TTS on terminal job states; set enabled: false to silence",
                 "projects[].targets": "Named deploy actions with runner kind pnpm_script | npm_script | make | shell"
             }

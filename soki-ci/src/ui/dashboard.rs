@@ -367,7 +367,10 @@ pub async fn run_dashboard(mut ctx: AppContext, api: Option<ApiHandle>) -> Resul
                             KeyCode::Char('n') | KeyCode::Esc => mode = Mode::Browse,
                             _ => {}
                         },
-                        Mode::StdinInput { job_id, ref mut buffer } => match key.code {
+                        Mode::StdinInput {
+                            job_id,
+                            ref mut buffer,
+                        } => match key.code {
                             KeyCode::Esc => {
                                 mode = Mode::Browse;
                                 status_line = "stdin cancelled".into();
@@ -590,6 +593,7 @@ fn list_row_index(area: Rect, row: u16) -> usize {
     row.saturating_sub(area.y.saturating_add(1)) as usize
 }
 
+#[allow(clippy::too_many_arguments)]
 fn move_selection(
     ctx: &AppContext,
     jobs: &[JobRecord],
@@ -644,6 +648,7 @@ fn move_selection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn jump_edge(
     ctx: &AppContext,
     jobs: &[JobRecord],
@@ -691,6 +696,7 @@ fn jump_edge(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_mouse(
     m: crossterm::event::MouseEvent,
     ctx: &AppContext,
@@ -1250,6 +1256,7 @@ fn phase_style(p: JobPhase) -> Style {
         JobPhase::Success => Style::default().fg(Color::Green),
         JobPhase::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         JobPhase::Cancelled => Style::default().fg(Color::DarkGray),
+        JobPhase::Interrupted => Style::default().fg(Color::Yellow),
     }
 }
 
@@ -1260,6 +1267,7 @@ fn phase_label(p: JobPhase) -> &'static str {
         JobPhase::Success => "success",
         JobPhase::Error => "failed",
         JobPhase::Cancelled => "cancelled",
+        JobPhase::Interrupted => "interrupted",
     }
 }
 
@@ -1270,6 +1278,7 @@ fn phase_glyph(p: JobPhase) -> &'static str {
         JobPhase::Success => "✓",
         JobPhase::Error => "✗",
         JobPhase::Cancelled => "⊘",
+        JobPhase::Interrupted => "⚠",
     }
 }
 
@@ -1279,10 +1288,7 @@ fn short_id(id: Uuid) -> String {
 }
 
 fn job_time_label(job: &JobRecord) -> String {
-    let t: DateTime<Utc> = job
-        .finished_at
-        .or(job.started_at)
-        .unwrap_or_else(Utc::now);
+    let t: DateTime<Utc> = job.finished_at.or(job.started_at).unwrap_or_else(Utc::now);
     t.format("%H:%M:%S").to_string()
 }
 
@@ -1318,9 +1324,10 @@ fn target_badge_styled(
     if relevant.is_empty() {
         return ("○", Style::default().fg(Color::DarkGray));
     }
-    if let Some(active) = relevant.iter().find(|j| {
-        j.phase == JobPhase::Running || j.phase == JobPhase::Queued
-    }) {
+    if let Some(active) = relevant
+        .iter()
+        .find(|j| j.phase == JobPhase::Running || j.phase == JobPhase::Queued)
+    {
         return (phase_glyph(active.phase), phase_style(active.phase));
     }
     let latest = relevant[0];
@@ -1334,6 +1341,7 @@ fn worst_priority(a: JobPhase, b: JobPhase) -> JobPhase {
         JobPhase::Queued => 2,
         JobPhase::Success => 1,
         JobPhase::Cancelled => 1,
+        JobPhase::Interrupted => 1,
     };
     if score(b) > score(a) {
         b
@@ -1360,13 +1368,13 @@ async fn start_deploy(
     target_id: &str,
     status: &mut String,
 ) -> Result<()> {
-    let project = find_project(&ctx.config, project_id)
-        .ok_or_else(|| anyhow::anyhow!("project missing"))?;
+    let project =
+        find_project(&ctx.config, project_id).ok_or_else(|| anyhow::anyhow!("project missing"))?;
     let target = project
         .targets
         .get(target_id)
         .ok_or_else(|| anyhow::anyhow!("target missing"))?;
-    let id = ctx.jobs.enqueue(project, target).await?;
+    let id = ctx.jobs.enqueue_with_source(project, target, "tui").await?;
     *status = format!("started {project_id}/{target_id} ({id})");
     Ok(())
 }
@@ -1384,10 +1392,7 @@ mod tests {
 
     #[test]
     fn wrap_splits_on_display_width() {
-        assert_eq!(
-            wrap_to_width("abcdefghij", 4),
-            vec!["abcd", "efgh", "ij"]
-        );
+        assert_eq!(wrap_to_width("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
         let long = "x".repeat(50);
         let rows = wrap_to_width(&long, 12);
         assert_eq!(rows.len(), 5);

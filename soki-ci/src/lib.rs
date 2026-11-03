@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod api;
 pub mod broker;
 pub mod capabilities;
@@ -5,6 +7,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod env_schema;
+pub mod history;
 pub mod jobs;
 pub mod output;
 pub mod runner;
@@ -20,6 +23,9 @@ pub async fn run() -> anyhow::Result<()> {
         None | Some(cli::Commands::Watch) => {
             let ctx = commands::AppContext::from_cli(&cli).await?;
             if std::io::stdout().is_terminal() && !cli.non_interactive {
+                if cli.no_api {
+                    ctx.jobs.recover_interrupted().await;
+                }
                 let api = if cli.no_api {
                     None
                 } else {
@@ -27,8 +33,13 @@ pub async fn run() -> anyhow::Result<()> {
                     let handle = api::spawn_api(
                         ctx.jobs.clone(),
                         ctx.config_path.clone(),
-                        addr,
-                        cli.api_token.clone(),
+                        api::ApiOptions {
+                            bind: addr,
+                            api_token: cli.api_token.clone(),
+                            web_dir: cli.web_dir.clone(),
+                            allow_config_write: cli.allow_config_write,
+                            open: false,
+                        },
                     )
                     .await?;
                     eprintln!(
@@ -132,10 +143,18 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(cli::Commands::Serve) => {
+        Some(cli::Commands::Serve) | Some(cli::Commands::Web) => {
             let ctx = commands::AppContext::from_cli(&cli).await?;
             let addr = commands::serve::parse_bind(&cli.bind)?;
-            commands::serve::run(ctx, addr, cli.api_token.clone()).await?;
+            commands::serve::run(
+                ctx,
+                addr,
+                cli.api_token.clone(),
+                cli.web_dir.clone(),
+                cli.allow_config_write,
+                cli.open,
+            )
+            .await?;
         }
     }
 
