@@ -125,6 +125,7 @@ Pattern grammar:
 - header:Header-Name:REGEX — match header value
 - body:TEXT — match body preview
 - has:list-unsubscribe — List-Unsubscribe header present
+- lang:es — Spanish-language message (subject/body/Content-Language)
 - all:PART+PART — all sub-patterns must match (e.g. all:domain:amazon.com+subject:Your order)
 
 Return JSON:

@@ -116,9 +116,10 @@ fn pattern_covers_pattern(keeper: &str, other: &str) -> bool {
             message_matches_pattern(keeper, &msg)
         }
         PatternKind::All(parts) => parts.iter().all(|p| pattern_covers_pattern(keeper, p)),
-        PatternKind::Body(_) | PatternKind::Header { .. } | PatternKind::HasListUnsubscribe => {
-            false
-        }
+        PatternKind::Body(_)
+        | PatternKind::Header { .. }
+        | PatternKind::HasListUnsubscribe
+        | PatternKind::Lang(_) => false,
     }
 }
 

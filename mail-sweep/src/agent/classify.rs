@@ -81,7 +81,7 @@ Return JSON:
 
 Rules:
 - Prefer `from:` for single senders; use `domain:` when the whole domain is similar noise.
-- Use `header:`, `body:`, `has:list-unsubscribe`, or `all:PART+PART` when they better capture the pattern.
+- Use `header:`, `body:`, `lang:es`, `has:list-unsubscribe`, or `all:PART+PART` when they better capture the pattern.
 - One pattern can cover a sender group; do NOT return per-message entries.
 - Respect user learning hints when the sender matches.
 - Prefer `archive` (or `mark_read`) over `delete` for newsletters/marketing — deletes need human Review.

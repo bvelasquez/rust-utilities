@@ -17,7 +17,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -270,6 +272,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    stdout.execute(EnableFocusChange)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -368,24 +371,31 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
         };
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
+            match event::read()? {
+                // Sleep/lock often leaves the alt screen out of sync with ratatui's
+                // differential buffer; wipe so the next draw is a full repaint.
+                Event::Resize(_, _) | Event::FocusGained => {
+                    terminal.clear()?;
                     continue;
                 }
-                if state.show_help {
-                    match key.code {
-                        KeyCode::Char('?') | KeyCode::Esc => state.show_help = false,
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            state.help_scroll = (state.help_scroll + 1)
-                                .min(help::help_line_count().saturating_sub(1));
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            state.help_scroll = state.help_scroll.saturating_sub(1);
-                        }
-                        _ => {}
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                    continue;
-                }
+                    if state.show_help {
+                        match key.code {
+                            KeyCode::Char('?') | KeyCode::Esc => state.show_help = false,
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                state.help_scroll = (state.help_scroll + 1)
+                                    .min(help::help_line_count().saturating_sub(1));
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                state.help_scroll = state.help_scroll.saturating_sub(1);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                 if matches!(state.overlay, OverlayMode::MessageRead { .. }) {
                     handle_message_read_key(
                         &mut terminal,
@@ -890,8 +900,13 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        terminal.clear()?;
+                    }
                     _ => {}
                 }
+                }
+                _ => {}
             }
         } else if state.auto_on && !jobs.is_busy() && last_auto.elapsed() >= poll {
             match jobs::spawn_auto(&mut jobs, ctx) {
@@ -906,6 +921,7 @@ pub async fn run(ctx: &mut CommandContext) -> Result<()> {
 
     disable_raw_mode()?;
     let mut stdout = io::stdout();
+    stdout.execute(DisableFocusChange)?;
     stdout.execute(LeaveAlternateScreen)?;
     Ok(())
 }

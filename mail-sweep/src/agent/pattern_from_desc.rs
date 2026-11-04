@@ -14,6 +14,7 @@ Patterns must use this grammar exactly (no inventing OR compounds):\n\
 - body:TEXT — body preview\n\
 - header:Name or header:Name:REGEX\n\
 - has:list-unsubscribe\n\
+- lang:es (Spanish-language subject/body)\n\
 - all:PART+PART — AND of sub-patterns (e.g. all:domain:amazon.com+subject:Invoice)\n\
 Prefer durable reusable rules. Use regex only when needed; escape carefully. \
 For case-insensitive subject matches prefer a simple literal substring when enough, \

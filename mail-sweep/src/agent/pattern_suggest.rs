@@ -99,6 +99,7 @@ Pattern grammar:
 - header:Header-Name (non-empty) or header:Header-Name:REGEX
 - body:TEXT
 - has:list-unsubscribe
+- lang:es (Spanish-language subject/body)
 - all:PART+PART (AND compound, e.g. all:domain:github.com+subject:\[.*\])
 
 Return JSON:

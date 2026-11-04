@@ -141,7 +141,7 @@ pub fn render_pattern_editor(
     lines.extend([
         Line::from(""),
         Line::from(Span::styled(
-            "subject:…  from:…  domain:…  header:…  body:…  has:list-unsubscribe",
+            "subject:…  from:…  domain:…  header:…  body:…  lang:es  has:list-unsubscribe",
             Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(

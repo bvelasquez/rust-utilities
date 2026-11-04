@@ -125,6 +125,7 @@ projects:
   - id: flatland3
     name: Flatland 3
     path: "${projects_dir}/flatland3"
+    package_manager: npm
     targets:
       deploy-oracle:
         label: Deploy Oracle (code only)
@@ -141,9 +142,30 @@ projects:
         description: "Dry-run by default from CLI. In soki-ci, set env APPLY=1 to write (see target env in projects.yaml)."
         env:
           APPLY: "1"
+      publish-oracle:
+        label: Publish Oracle (deploy + clone DB/assets)
+        runner: { kind: make, target: publish-oracle }
+      sync-content-oracle:
+        runner: { kind: make, target: sync-content-oracle }
+      clone-oracle:
+        label: Clone Oracle DB/assets (destructive)
+        runner: { kind: make, target: clone-oracle }
       gfx-install:
         label: Install Gfx Client
         runner: { kind: make, target: gfx-install }
+      package-client:
+        runner: { kind: make, target: package-client }
+      deploy-spec:
+        label: Deploy Website/Spec (Firebase Hosting)
+        runner: { kind: npm_script, script: deploy:spec }
+      publish-crates:
+        runner:
+          kind: shell
+          command: ["gh", "workflow", "run", "publish-crates.yml", "--repo", "bvelasquez/flatland3"]
+      publish-client-release:
+        runner:
+          kind: shell
+          command: ["gh", "workflow", "run", "publish-client-release.yml", "--repo", "bvelasquez/flatland3"]
 
   - id: mail-sweep
     name: Mail Sweep
@@ -168,3 +190,18 @@ projects:
         runner: { kind: make, target: build }
       test:
         runner: { kind: make, target: test }
+
+  - id: aitistra
+    name: AItistra
+    path: "${projects_dir}/simple_task"
+    package_manager: npm
+    targets:
+      functions:
+        label: Firebase Functions (publicApi)
+        runner: { kind: npm_script, script: deploy:functions }
+      hosting:
+        label: Firebase Hosting
+        runner: { kind: npm_script, script: deploy:hosting }
+      all:
+        label: Functions + Hosting + Firestore
+        runner: { kind: npm_script, script: deploy:all }

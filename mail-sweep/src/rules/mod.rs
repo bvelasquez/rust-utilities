@@ -4,6 +4,7 @@ use crate::mail::parser::ParsedMail;
 use crate::rules::patterns::{header_value, pattern_specificity, regex_match};
 use crate::store::CachedMessage;
 
+pub mod lang;
 pub mod patterns;
 pub mod subsume;
 
@@ -54,6 +55,14 @@ pub fn message_matches_pattern(pattern: &str, msg: &CachedMessage) -> bool {
         return msg.list_unsubscribe.as_ref().is_some_and(|s| !s.is_empty());
     }
 
+    if let Some(rest) = pattern.strip_prefix("lang:") {
+        let code = rest.trim().to_ascii_lowercase();
+        return match code.as_str() {
+            "es" | "spanish" => lang::message_is_spanish(msg),
+            _ => false,
+        };
+    }
+
     if let Some(rest) = pattern.strip_prefix("all:") {
         return rest
             .split('+')
@@ -92,6 +101,18 @@ pub fn message_matches_pattern(pattern: &str, msg: &CachedMessage) -> bool {
 }
 
 pub fn builtin_rule(msg: &CachedMessage) -> Option<MessageDecision> {
+    // Spanish spam/scam mail is almost always junk for this inbox — treat like Z.
+    if lang::message_is_spanish(msg) {
+        return Some(decision(
+            msg,
+            MessageCategory::Spam,
+            1,
+            MailAction::Delete,
+            0.95,
+            "Spanish-language message (builtin lang:es → delete)",
+        ));
+    }
+
     if let Some(ref lu) = msg.list_unsubscribe {
         if !lu.is_empty() {
             return Some(decision(
@@ -123,6 +144,15 @@ pub fn builtin_rule(msg: &CachedMessage) -> Option<MessageDecision> {
 }
 
 pub fn builtin_rule_parsed(parsed: &ParsedMail) -> Option<(MessageCategory, u8, MailAction, f32, String)> {
+    if lang::is_spanish(&parsed.subject, &parsed.body_preview, None) {
+        return Some((
+            MessageCategory::Spam,
+            1,
+            MailAction::Delete,
+            0.95,
+            "Spanish-language message (builtin lang:es → delete)".into(),
+        ));
+    }
     if parsed.list_unsubscribe.as_ref().is_some_and(|s| !s.is_empty()) {
         return Some((
             MessageCategory::Newsletter,
@@ -254,6 +284,17 @@ mod tests {
     fn subject_regex() {
         let m = sample();
         assert!(message_matches_pattern(r"subject:^Your order", &m));
+    }
+
+    #[test]
+    fn spanish_builtin_deletes() {
+        let mut m = sample();
+        m.subject = "¡Oferta exclusiva para ti!".into();
+        m.body_preview = "Aprovecha este descuento y date de baja si no quieres más".into();
+        let d = apply_rules_to_message(&m, &[]).unwrap();
+        assert_eq!(d.action, MailAction::Delete);
+        assert_eq!(d.category, MessageCategory::Spam);
+        assert!(message_matches_pattern("lang:es", &m));
     }
 
     #[test]
