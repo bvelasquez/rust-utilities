@@ -7,12 +7,14 @@ import {
   Gauge,
   ListOrdered,
   Rocket,
+  Star,
   TriangleAlert,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Job, Status } from "../api/types";
+import { FavoritesPanel } from "../components/FavoritesPanel";
 import { JobTable } from "../components/JobTable";
 import { useToast } from "../components/Toast";
 import {
@@ -101,6 +103,18 @@ export function OverviewPage() {
           icon={<Gauge className="size-4 text-fuchsia-400" />}
         />
       </div>
+
+      <Card className="min-w-0">
+        <CardHeader
+          title={
+            <span className="inline-flex items-center gap-2">
+              <Star className="size-4 text-amber-300" /> Favorite commands
+            </span>
+          }
+          subtitle="Pinned targets — reorder with arrows, run without opening the project"
+        />
+        <FavoritesPanel compact />
+      </Card>
 
       <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
         <Card className="min-w-0">

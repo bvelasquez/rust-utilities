@@ -187,6 +187,8 @@ curl -s -X POST http://127.0.0.1:9847/jobs/<job_id>/input \
 
 `build_id` matches the target key in `projects.yaml` (same as `soki-ci deploy run -t`). Remote starts share the TUI’s in-process job list.
 
+`soki-ci deploy run` also submits to the running server at `--bind` when one is reachable, so CLI-started jobs appear in the TUI and web UI and can be streamed/cancelled there. It falls back to a standalone in-process run when no server answers `/health`.
+
 To answer an interactive prompt from another terminal while the TUI is up:
 
 ```bash

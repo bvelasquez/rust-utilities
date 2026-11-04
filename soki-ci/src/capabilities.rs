@@ -544,8 +544,8 @@ fn cli_commands() -> Value {
         {
             "id": "deploy run",
             "mutation": true,
-            "description": "Start deploy job(s); requires --yes in automation",
-            "flags": ["-p/--project", "-t/--target", "--all", "--yes", "--wait", "--config", "--json"]
+            "description": "Start deploy job(s); submits to the running server's shared job store when reachable (so the job appears in the TUI/web UI), otherwise runs in-process; requires --yes in automation",
+            "flags": ["-p/--project", "-t/--target", "--all", "--yes", "--wait", "--bind", "--api-token", "--config", "--json"]
         },
         {
             "id": "jobs list",
@@ -616,7 +616,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "bindFlag": "--bind",
             "startedBy": ["soki-ci (TUI, default)", "soki-ci serve (API + web)", "soki-ci web (API + web, optional --open)"],
             "disableFlag": "--no-api",
-            "sharedJobStore": "TUI and API in the same process share one in-memory job list",
+            "sharedJobStore": "TUI and API in the same process share one in-memory job list. `soki-ci deploy run` submits to the running server (detected at --bind) when reachable so CLI and web/TUI share the same queue; it falls back to an in-process orchestrator only when no server answers /health.",
             "authentication": {
                 "type": "bearer",
                 "header": "Authorization",

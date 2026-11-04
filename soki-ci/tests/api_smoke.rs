@@ -673,3 +673,68 @@ projects:
         .unwrap();
     assert_eq!(response.status(), 400);
 }
+
+#[tokio::test]
+async fn cli_deploy_run_routes_through_running_server() {
+    use soki_ci::commands::AppContext;
+
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = write_test_config(&temp);
+    let config = load_config(&config_path).unwrap();
+
+    // Separate stores on purpose: the CLI's own orchestrator must stay empty,
+    // while the server's orchestrator receives the job (that is what the web
+    // UI reads from).
+    let server_jobs = Arc::new(JobOrchestrator::new_with_data_dir(
+        &config,
+        temp.path().join("server-data"),
+    ));
+    let handle = api::spawn_api(
+        server_jobs.clone(),
+        config_path.clone(),
+        api::ApiOptions::new("127.0.0.1:0".parse().unwrap()),
+    )
+    .await
+    .expect("spawn_api");
+    let bind = handle.bind.to_string();
+
+    let ctx = AppContext {
+        config_path: config_path.clone(),
+        config: config.clone(),
+        jobs: Arc::new(JobOrchestrator::new_with_data_dir(
+            &config,
+            temp.path().join("cli-data"),
+        )),
+    };
+
+    soki_ci::commands::deploy::run(
+        &ctx,
+        "api-test",
+        Some("ok"),
+        false,
+        true,
+        true,
+        true,
+        &bind,
+        None,
+    )
+    .await
+    .expect("deploy run via server");
+
+    let server_job_list = server_jobs.list_jobs().await;
+    assert_eq!(
+        server_job_list.len(),
+        1,
+        "job should be registered with the server"
+    );
+    assert_eq!(server_job_list[0].source, "cli");
+    assert_eq!(server_job_list[0].phase, JobPhase::Success);
+
+    let local_job_list = ctx.jobs.list_jobs().await;
+    assert!(
+        local_job_list.is_empty(),
+        "CLI must not run the job in its own process when a server is up"
+    );
+
+    handle.shutdown().await;
+}

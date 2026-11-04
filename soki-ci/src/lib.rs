@@ -112,6 +112,8 @@ pub async fn run() -> anyhow::Result<()> {
                         *yes,
                         *wait,
                         cli.json,
+                        &cli.bind,
+                        cli.api_token.as_deref(),
                     )
                     .await?;
                 }

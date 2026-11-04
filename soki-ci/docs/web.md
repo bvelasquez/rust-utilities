@@ -76,6 +76,16 @@ with `rust-embed`. Set `SOKI_CI_WEB_DIR` or `--web-dir` to serve from disk.
 - `Authorization: Bearer <token>` still works for agents and CLI clients.
 - Static assets stay public; data routes are protected.
 
+## Favorite commands
+
+Star any deploy target on a project detail page. Favorites are stored in the
+browser (`localStorage`) and:
+
+- Sort to the **top** of that project’s target list (global order across projects).
+- Appear on the **Overview** with **Run** and reorder (↑↓) controls.
+
+Reload the config after editing `projects.yaml`; favorites are independent of the server.
+
 ## Config editing
 
 `PUT /api/config` is disabled by default. Start with `--allow-config-write` (or

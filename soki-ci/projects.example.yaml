@@ -135,6 +135,12 @@ projects:
       sync-oracle-push:
         label: "Sync content local → Oracle (terminal: FILES=… APPLY=1 make sync-oracle-push)"
         runner: { kind: make, target: sync-oracle-push }
+      sync-oracle-promote:
+        label: "Promote content (pull, auto scoped push, pull back — terminal: APPLY=1)"
+        runner: { kind: make, target: sync-oracle-promote }
+        description: "Dry-run by default from CLI. In soki-ci, set env APPLY=1 to write (see target env in projects.yaml)."
+        env:
+          APPLY: "1"
       gfx-install:
         label: Install Gfx Client
         runner: { kind: make, target: gfx-install }

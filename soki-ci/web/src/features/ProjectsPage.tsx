@@ -13,7 +13,9 @@ import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { Job, Project, Target } from "../api/types";
+import { FavoriteStar } from "../components/FavoriteStar";
 import { PhaseBadge, LiveDuration } from "../components/PhaseBadge";
+import { sortTargetsWithFavorites } from "../lib/favorites";
 import { useToast } from "../components/Toast";
 import {
   Button,
@@ -197,6 +199,7 @@ export function ProjectDetailPage() {
   if (project.isLoading) return <Spinner />;
   if (project.isError) return <ErrorState error={project.error} />;
   const data = project.data!;
+  const targets = sortTargetsWithFavorites(data.id, data.targets);
 
   return (
     <div className="space-y-5">
@@ -255,11 +258,18 @@ export function ProjectDetailPage() {
           subtitle="Each target runs in the project working tree. Same-project deploys are serialized."
         />
         <div className="divide-y divide-zinc-800/60">
-          {data.targets.map((target) => (
+          {targets.map((target) => (
             <div key={target.id} className="px-4 py-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
+                    <FavoriteStar
+                      projectId={data.id}
+                      projectName={data.name}
+                      targetId={target.id}
+                      targetLabel={target.label}
+                      runnerSummary={target.runner_summary}
+                    />
                     <span className="text-sm font-medium text-zinc-200">{target.label}</span>
                     <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
                       {target.id}
@@ -338,7 +348,7 @@ export function ProjectDetailPage() {
               </div>
             </div>
           ))}
-          {data.targets.length === 0 && (
+          {targets.length === 0 && (
             <EmptyState
               title="No targets"
               description="Add targets to this project in projects.yaml, then reload the config."
