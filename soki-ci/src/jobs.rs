@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -752,58 +753,76 @@ impl JobOrchestrator {
         let data_dir = self.data_dir.clone();
 
         tokio::spawn(async move {
-            let permit = tokio::select! {
-                res = semaphore.acquire_owned() => res.ok(),
-                _ = task_cancel.cancelled() => None,
-            };
-            let Some(_permit) = permit else {
-                cleanup_prequeue(&inner, &data_dir, id).await;
-                return;
-            };
-            let still_queued = {
-                let g = inner.lock().await;
-                g.jobs.get(&id).is_some_and(|j| j.phase == JobPhase::Queued)
-            };
-            if !still_queued {
-                cleanup_prequeue(&inner, &data_dir, id).await;
-                return;
+            // The permit must be dropped before TTS. `broker.speak` waits for
+            // playback (up to the client timeout) and a broker that accepts the
+            // connection but never answers holds it for that whole time. The
+            // permit is the global parallelism budget, so a few stuck
+            // announcements fill it and every later job stays `queued` with no
+            // child. Project slots are already cleared in `finalize_job`.
+            enum AfterPermit {
+                Speak(String),
+                Failed(String),
+                Done,
             }
+            let step = async {
+                let permit = tokio::select! {
+                    res = semaphore.acquire_owned() => res.ok(),
+                    _ = task_cancel.cancelled() => None,
+                };
+                let Some(permit) = permit else {
+                    cleanup_prequeue(&inner, &data_dir, id).await;
+                    return AfterPermit::Done;
+                };
+                let still_queued = {
+                    let g = inner.lock().await;
+                    g.jobs.get(&id).is_some_and(|j| j.phase == JobPhase::Queued)
+                };
+                if !still_queued {
+                    drop(permit);
+                    cleanup_prequeue(&inner, &data_dir, id).await;
+                    return AfterPermit::Done;
+                }
 
-            if let Err(e) = run_job(
-                id,
-                spec,
-                log_path.clone(),
-                inner.clone(),
-                data_dir.clone(),
-                in_rx,
-                task_cancel.clone(),
-                task_pid,
-                project_id.clone(),
-                project_name,
-                target_label,
-                target_speak,
-                speak,
-                broker,
-            )
-            .await
-            {
-                let _ = record_log(
-                    &inner,
+                let announcement = std::panic::AssertUnwindSafe(run_job(
                     id,
-                    &log_path,
-                    LogStream::System,
-                    format!("orchestrator error: {e}"),
-                )
+                    spec,
+                    log_path.clone(),
+                    inner.clone(),
+                    data_dir.clone(),
+                    in_rx,
+                    task_cancel,
+                    task_pid,
+                    project_id,
+                    project_name,
+                    target_label,
+                    target_speak,
+                    speak,
+                ))
+                .catch_unwind()
                 .await;
-                let _ = finalize_job(
-                    &inner,
-                    &data_dir,
-                    id,
-                    JobPhase::Error,
-                    None,
-                    Some(format!("orchestrator error: {e}")),
-                )
-                .await;
+                drop(permit);
+                match announcement {
+                    Ok(Ok(Some(msg))) => AfterPermit::Speak(msg),
+                    Ok(Ok(None)) => AfterPermit::Done,
+                    Ok(Err(e)) => AfterPermit::Failed(format!("orchestrator error: {e}")),
+                    Err(_) => AfterPermit::Failed("dispatcher task panicked".to_string()),
+                }
+            };
+            match step.await {
+                AfterPermit::Speak(msg) => {
+                    let speak_err = broker.speak(&msg).await.err();
+                    let mut g = inner.lock().await;
+                    g.speech_pending.remove(&id);
+                    if let Some(e) = speak_err {
+                        if let Some(job) = g.jobs.get_mut(&id) {
+                            job.push_log(format!("speak warning: {e}"));
+                        }
+                    }
+                }
+                AfterPermit::Done => {}
+                AfterPermit::Failed(message) => {
+                    fail_active_job(&inner, &data_dir, id, message).await;
+                }
             }
         });
 
@@ -1050,16 +1069,15 @@ async fn run_job(
     target_label: String,
     target_speak: Option<bool>,
     speak_defaults: SpeakDefaults,
-    broker: BrokerClient,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let (events, job) = {
         let mut g = inner.lock().await;
         let Some(job) = g.jobs.get_mut(&id) else {
             g.clear_project_slot(&project_id, id);
-            return Ok(());
+            return Ok(None);
         };
         if job.phase != JobPhase::Queued {
-            return Ok(());
+            return Ok(None);
         }
         job.phase = JobPhase::Running;
         job.started_at = Some(Utc::now());
@@ -1103,7 +1121,7 @@ async fn run_job(
                 Some(format!("spawn error: {e}")),
             )
             .await;
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -1188,7 +1206,7 @@ async fn run_job(
                 Some(format!("wait error: {e}")),
             )
             .await;
-            return Ok(());
+            return Ok(None);
         }
         None => {
             let _ = finalize_job(
@@ -1200,7 +1218,7 @@ async fn run_job(
                 Some("cancelled".to_string()),
             )
             .await;
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -1227,37 +1245,54 @@ async fn run_job(
         None
     };
 
-    if should_speak {
-        inner.lock().await.speech_pending.insert(id);
-    }
-
     let message = if cancelled {
         "cancelled".to_string()
     } else {
         format!("finished: exit {code}")
     };
-    let finished = finalize_job(&inner, &data_dir, id, phase, Some(code), Some(message)).await;
-
+    // Mark the announcement pending before the phase becomes terminal so
+    // in-process `--wait` cannot exit in the gap and cancel playback.
     if should_speak {
-        let msg = if success {
-            format!("{project_name} {target_label} deploy succeeded.")
-        } else if let Some(line) = last_output_line {
-            format!("{project_name} {target_label} deploy failed with exit code {code}: {line}")
-        } else {
-            format!("{project_name} {target_label} deploy failed with exit code {code}.")
-        };
-        let speak_err = broker.speak(&msg).await.err();
-        let mut g = inner.lock().await;
-        g.speech_pending.remove(&id);
-        if let Some(e) = speak_err {
-            if let Some(job) = g.jobs.get_mut(&id) {
-                job.push_log(format!("speak warning: {e}"));
-            }
-        }
+        inner.lock().await.speech_pending.insert(id);
     }
+    let _ = finalize_job(&inner, &data_dir, id, phase, Some(code), Some(message)).await;
 
-    let _ = finished;
-    Ok(())
+    if !should_speak {
+        return Ok(None);
+    }
+    let msg = if success {
+        format!("{project_name} {target_label} deploy succeeded.")
+    } else if let Some(line) = last_output_line {
+        format!("{project_name} {target_label} deploy failed with exit code {code}: {line}")
+    } else {
+        format!("{project_name} {target_label} deploy failed with exit code {code}.")
+    };
+    // Spoken after the caller drops the parallelism permit.
+    Ok(Some(msg))
+}
+
+async fn fail_active_job(
+    inner: &Arc<Mutex<OrchestratorInner>>,
+    data_dir: &Path,
+    id: Uuid,
+    message: String,
+) {
+    let active = {
+        let g = inner.lock().await;
+        g.jobs.get(&id).is_some_and(|job| job.phase.is_active())
+    };
+    if !active {
+        return;
+    }
+    let _ = finalize_job(
+        inner,
+        data_dir,
+        id,
+        JobPhase::Error,
+        None,
+        Some(message),
+    )
+    .await;
 }
 
 fn parse_log_file(content: &str, tail: usize) -> Vec<LogLine> {
@@ -1295,6 +1330,7 @@ fn is_system_line(line: &str) -> bool {
         || line.starts_with("finished:")
         || line.starts_with("cancel")
         || lower.contains("orchestrator error")
+        || lower.contains("dispatcher task panicked")
         || lower.contains("spawn error")
         || lower.contains("wait error")
         || lower.contains("speak warning")

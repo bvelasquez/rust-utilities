@@ -53,7 +53,11 @@ pub async fn run(
         ids.push((tid.to_string(), id));
     }
 
-    if wait && !all {
+    // A server keeps the dispatcher alive after this process exits. An
+    // in-process fallback does not: dropping the runtime aborts the task and
+    // the sidecar stays `queued` forever. Always drive those jobs to a
+    // terminal phase, even without `--wait`.
+    if !all && (server.is_none() || wait) {
         for (_, id) in &ids {
             wait_for_job(ctx, server.as_ref(), *id).await?;
         }

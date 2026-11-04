@@ -738,3 +738,97 @@ async fn cli_deploy_run_routes_through_running_server() {
 
     handle.shutdown().await;
 }
+
+/// A broker that accepts the TCP connection and never answers must not pin the
+/// only parallelism permit. The next project's job has to reach a terminal
+/// phase while that announcement is still stuck.
+#[tokio::test]
+async fn hung_speech_does_not_stall_the_dispatcher() {
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        while let Ok((sock, _)) = listener.accept() {
+            // Hold the socket open so reqwest waits on response headers.
+            std::mem::forget(sock);
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("projects.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+version: 1
+defaults:
+  max_parallel: 1
+  speak:
+    enabled: true
+    base_url: http://127.0.0.1:{port}
+    on: [success, error]
+projects:
+  - id: alpha
+    path: "."
+    targets:
+      fast:
+        runner:
+          kind: shell
+          command: ["true"]
+  - id: beta
+    path: "."
+    targets:
+      fast:
+        runner:
+          kind: shell
+          command: ["true"]
+"#
+        ),
+    )
+    .unwrap();
+    let config = load_config(&path).unwrap();
+    let jobs = JobOrchestrator::new_with_data_dir(&config, temp.path().join("data"));
+    let alpha = config.projects.iter().find(|p| p.id == "alpha").unwrap();
+    let beta = config.projects.iter().find(|p| p.id == "beta").unwrap();
+    let alpha_target = alpha.targets.get("fast").unwrap();
+    let beta_target = beta.targets.get("fast").unwrap();
+
+    let first = jobs.enqueue(alpha, alpha_target).await.unwrap();
+    for _ in 0..50 {
+        if jobs
+            .get_job(first)
+            .await
+            .is_some_and(|job| job.phase == JobPhase::Success)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        jobs.get_job(first).await.unwrap().phase,
+        JobPhase::Success,
+        "first job should finish even though its announcement is stuck"
+    );
+
+    let second = jobs.enqueue(beta, beta_target).await.unwrap();
+    for _ in 0..100 {
+        if jobs
+            .get_job(second)
+            .await
+            .is_some_and(|job| job.phase.is_terminal())
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let second_job = jobs.get_job(second).await.unwrap();
+    assert_eq!(
+        second_job.phase,
+        JobPhase::Success,
+        "second job stayed {:?} (started_at={:?}) while speech held a permit",
+        second_job.phase,
+        second_job.started_at
+    );
+    assert!(second_job.started_at.is_some());
+}
